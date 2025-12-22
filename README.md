@@ -1,4 +1,4 @@
-SISTEMA DE VENTA DE FICHAS POR HOTSPOT - GESTIÓN DE WIFI PAGADO
+SISTEMA DE VENTA DE FICHAS POR HOTSPOT CON PAGO CON TARJETA
 ================================================================================
 
 DESCRIPCIÓN:
