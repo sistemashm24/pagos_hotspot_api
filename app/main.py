@@ -1,0 +1,133 @@
+# main.py - VERSIÓN WINDOWS
+import sys
+import os
+from pathlib import Path
+
+# DEBUG: Mostrar path actual
+print("=== INICIANDO EN WINDOWS ===")
+print(f"Directorio actual: {os.getcwd()}")
+print(f"Python path: {sys.path}")
+
+# Agregar raíz del proyecto AL PRINCIPIO del path
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.core.config import settings
+
+print("\n=== CARGANDO MÓDULOS ===")
+
+# Diccionario de módulos a cargar
+modulos_config = {
+    # Públicos V1
+    "app.api.v1.auth": {
+        "router_name": "router",
+        "prefix": "/api/v1/auth",
+        "tags": ["Authentication"]
+    },
+    "app.api.v1.config": {
+        "router_name": "router", 
+        "prefix": "/api/v1/config",
+        "tags": ["Configuration"]
+    },
+    "app.api.v1.payments": {
+        "router_name": "router",
+        "prefix": "/api/v1/payments", 
+        "tags": ["Pagar Hotspot"]
+    },
+    "app.api.v1.catalogo_perfiles_venta": {
+        "router_name": "router",
+        "prefix": "/api/v1",
+        "tags": ["Catalog"]
+    },
+    
+    # Cliente Admin
+    "app.api.v1.admin.empresa": {
+        "router_name": "router",
+        "prefix": "/api/v1/admin",
+        "tags": ["Cliente Admin"]
+    },
+    "app.api.v1.admin.products": {
+        "router_name": "router",
+        "prefix": "/api/v1/admin",
+        "tags": ["Cliente Admin - Products"]
+    },
+    "app.api.v1.admin.mikrotik_perfiles": {
+        "router_name": "router", 
+        "prefix": "/api/v1/admin",
+        "tags": ["Cliente Admin - MikroTik"]
+    },
+    
+    # Super Admin
+    "app.api.admin.empresas": {
+        "router_name": "router",
+        "prefix": "/admin",
+        "tags": ["Super Admin"]
+    },
+    "app.api.admin.routers": {
+        "router_name": "router",
+        "prefix": "/admin", 
+        "tags": ["Super Admin - Routers"]
+    },
+    "app.api.admin.usuarios": {
+        "router_name": "router",
+        "prefix": "/admin",
+        "tags": ["Super Admin - Usuarios"]
+    }
+}
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    description="Sistema de pagos multi-empresa para Hotspot MikroTik",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.BACKEND_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Cargar dinámicamente cada módulo
+for module_path, config in modulos_config.items():
+    try:
+        # Importar el módulo
+        module = __import__(module_path, fromlist=[''])
+        
+        # Obtener el router
+        if hasattr(module, config["router_name"]):
+            router = getattr(module, config["router_name"])
+            app.include_router(router, prefix=config["prefix"], tags=config["tags"])
+            print(f"✅ {module_path} cargado en {config['prefix']}")
+        else:
+            print(f"⚠️  {module_path} no tiene '{config['router_name']}'")
+            
+    except ModuleNotFoundError as e:
+        print(f"❌ No se pudo encontrar {module_path}: {e}")
+    except Exception as e:
+        print(f"❌ Error cargando {module_path}: {e}")
+
+print("\n=== SERVIDOR LISTO ===")
+
+@app.get("/")
+async def root():
+    return {
+        "message": "MikroTik Payment API - Windows",
+        "version": "1.0.0",
+        "status": "running",
+        "docs": "/docs"
+    }
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
