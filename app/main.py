@@ -1,4 +1,4 @@
-# main.py - VERSIÓN WINDOWS
+# main.py - VERSIÓN WINDOWS (ACTUALIZADO CON MERCADO PAGO)
 import sys
 import os
 from pathlib import Path
@@ -18,7 +18,7 @@ from app.core.config import settings
 
 print("\n=== CARGANDO MÓDULOS ===")
 
-# Diccionario de módulos a cargar
+# Diccionario de módulos a cargar (ACTUALIZADO CON MERCADO PAGO)
 modulos_config = {
     # Públicos V1
     "app.api.v1.auth": {
@@ -35,6 +35,12 @@ modulos_config = {
         "router_name": "router",
         "prefix": "/api/v1/payments", 
         "tags": ["Pagar Hotspot"]
+    },
+    # ✅ NUEVO: Mercado Pago
+    "app.api.v1.mercado_pago": {
+        "router_name": "router",
+        "prefix": "/api/v1/payments",
+        "tags": ["Pagar Hotspot - Mercado Pago"]
     },
     "app.api.v1.catalogo_perfiles_venta": {
         "router_name": "router",

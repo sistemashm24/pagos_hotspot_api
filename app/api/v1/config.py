@@ -15,6 +15,7 @@ async def get_public_config(
             "id": empresa.id,
             "nombre": empresa.nombre,
             "conekta_public_key": empresa.conekta_public_key,
+            "mercadopago_public_key": empresa.mercado_pago_public_key,
             "conekta_mode": empresa.conekta_mode
         },
         "router": {

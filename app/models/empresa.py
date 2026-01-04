@@ -15,7 +15,12 @@ class Empresa(Base):
     conekta_private_key = Column(String(100), nullable=False)
     conekta_public_key = Column(String(100), nullable=False)
     conekta_mode = Column(String(10), default="test")
-    
+            
+    # Campos Mercado Pago
+    mercado_pago_access_token = Column(String(255), nullable=True)
+    mercado_pago_public_key = Column(String(255), nullable=True)
+    mercado_pago_mode = Column(String(20), default='test')  # 'test' o 'live'
+
     activa = Column(Boolean, default=True)
     creada_en = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
     
