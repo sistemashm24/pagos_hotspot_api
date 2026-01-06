@@ -22,7 +22,7 @@ router = APIRouter(tags=["Pagar Hotspot - Mercado Pago"])
 from app.api.v1.payments import (
     rollback_usuario,
     ejecutar_auto_conexion,
-    validar_estado_pago_conekta,
+    validar_estado_pago_conekta,  # Puedes crear una específica para MP si necesitas
     construir_respuesta_auto_conexion,
     construir_respuesta_exitosa,
     manejar_error_inesperado
@@ -46,7 +46,7 @@ def validar_estado_mercado_pago(payment_result: Dict[str, Any]) -> Tuple[bool, s
     
     # Estados pendientes (aceptamos pero el usuario debe saber)
     if status == "pending":
-        return False, "Pago pendiente de confirmación."
+        return True, "Pago pendiente de confirmación."
     
     # Mapeo de estados inválidos
     status_messages = {
@@ -60,6 +60,8 @@ def validar_estado_mercado_pago(payment_result: Dict[str, Any]) -> Tuple[bool, s
     
     mensaje = status_messages.get(status, "El pago no fue aprobado.")
     return False, mensaje
+
+# app/api/v1/mercado_pago.py - Agregar logs detallados en el endpoint
 
 @router.post("/pagar-mercado-pago",
     summary="Procesar pago para acceso Hotspot MikroTik con Mercado Pago",
@@ -202,6 +204,8 @@ async def pagar_hotspot_mercado_pago(
                 "transaction_amount": payment_data.transaction_amount,
                 "installments": payment_data.installments,
                 "customer_email": payment_data.customer_email,
+                "customer_name": payment_data.customer_name,  # AGREGADO para mejor aprobación
+                "customer_phone": payment_data.customer_phone,  # AGREGADO para mejor aprobación
                 "payer": payment_data.payer or {"email": payment_data.customer_email}
             },
             metadata={
@@ -209,6 +213,7 @@ async def pagar_hotspot_mercado_pago(
                 "router_id": router.id,
                 "producto_id": producto.id,
                 "product_name": producto.nombre_venta,
+                "transaction_amount": payment_data.transaction_amount,  # AGREGADO para items
                 "auto_connect_requested": auto_connect_requested,
                 "mac_cliente": payment_data.mac_address,
                 "ip_cliente": payment_data.ip_address,
@@ -217,49 +222,27 @@ async def pagar_hotspot_mercado_pago(
                 "perfil_mikrotik": producto.perfil_mikrotik_nombre
             }
         )
+
         
         print(f"✅✅✅ PAGO PROCESADO")
         print(f"   • Status: {payment_result['status']}")
         print(f"   • ID: {payment_result['payment_id']}")
         
-        # Validar estado del pago
+        # Validar estado (usando tu función)
         es_valido, mensaje_error = validar_estado_mercado_pago(payment_result)
         
-        # Ejecutar auto-conexión si aplica (incluso si pendiente)
-        auto_conexion_resultado = None
-        if auto_connect_requested and payment_data.mac_address:
-            try:
-                print(f"\n🔗 EJECUTANDO AUTO-CONEXIÓN...")
-                auto_conexion_resultado = await ejecutar_auto_conexion(
-                    router_host=router.host,
-                    router_port=router.puerto,
-                    router_user=router.usuario,
-                    router_password=router.password_encrypted,
-                    username=credentials["username"],
-                    password=credentials["password"],
-                    mac_address=payment_data.mac_address,
-                    ip_address=payment_data.ip_address
-                )
-            except Exception as auto_connect_error:
-                print(f"⚠️  ERROR EN AUTO-CONEXIÓN: {str(auto_connect_error)}")
-                auto_conexion_resultado = {
-                    "success": False,
-                    "conectado": False,
-                    "error": str(auto_connect_error)
-                }
+        if not es_valido:
+            print(f"❌ PAGO INVÁLIDO: {mensaje_error}")
+            raise HTTPException(status_code=402, detail=mensaje_error)
         
-        auto_conexion_info = construir_respuesta_auto_conexion(
-            auto_connect_requested=auto_connect_requested,
-            mac_address=payment_data.mac_address,
-            ip_address=payment_data.ip_address,
-            auto_conexion_resultado=auto_conexion_resultado
-        )
+        print(f"✅✅✅ PAGO VALIDADO Y APROBADO")
         
-        # Guardar transacción en BD (siempre)
+        # 7. Guardar transacción
         print(f"\n💾 GUARDANDO TRANSACCIÓN EN BD...")
         
         transaccion = Transaccion(
             transaccion_id=str(payment_result["payment_id"]),
+            external_reference=payment_result["external_reference"],  # ✅ YA LO TIENES
             empresa_id=empresa.id,
             router_id=router.id,
             producto_id=producto.id,
@@ -270,13 +253,18 @@ async def pagar_hotspot_mercado_pago(
             cliente_telefono=payment_data.customer_phone,
             usuario_hotspot=credentials["username"],
             password_hotspot=credentials["password"],
-            metadata={
+            metadata_json={  # ✅ USAR metadata_json (no metadata)
                 "gateway": "mercado_pago",
+                "external_reference": payment_result["external_reference"],
+                "notification_url_configured": True,
+                "statement_descriptor": payment_result.get("statement_descriptor", "HOTSPOT WIFI"),
+                "binary_mode": True,
                 "payment_method": payment_result.get("payment_method", {}),
                 "status_detail": payment_result.get("status_detail"),
                 "installments": payment_data.installments,
                 "payer_email": payment_result.get("payer", {}).get("email"),
-                "raw_response": payment_result.get("raw_response", {})
+                "items_info": payment_result.get("additional_info", {}).get("items", []),
+                "webhook_expected": True
             },
             estado_pago=payment_result["status"],
             estado_hotspot="active",
@@ -284,6 +272,9 @@ async def pagar_hotspot_mercado_pago(
             pagada_en=datetime.utcnow(),
             usuario_creado_en=datetime.utcnow()
         )
+
+        ########
+
         db.add(transaccion)
         await db.commit()
         
@@ -291,12 +282,64 @@ async def pagar_hotspot_mercado_pago(
         print(f"   • Tipo usuario: {user_type}")
         print(f"   • Estado pago: {transaccion.estado_pago}")
         
-        # Construir respuesta (estructura siempre igual)
+        # 🔄 **EJECUTAR AUTO-CONEXIÓN SI SE SOLICITÓ**
+        auto_conexion_resultado = None
+        if auto_connect_requested and payment_data.mac_address:
+            try:
+                print(f"\n🔗 EJECUTANDO AUTO-CONEXIÓN...")
+                print(f"   • MAC: {payment_data.mac_address}")
+                print(f"   • IP: {payment_data.ip_address or 'No especificada'}")
+                print(f"   • Usuario: {credentials['username']}")
+                
+                auto_conexion_resultado = await ejecutar_auto_conexion(
+                    router_host=router.host,
+                    router_port=router.puerto,
+                    router_user=router.usuario,
+                    router_password=router.password_encrypted,
+                    username=credentials["username"],
+                    password=credentials["password"],
+                    mac_address=payment_data.mac_address,
+                    ip_address=payment_data.ip_address
+                )
+                
+                if auto_conexion_resultado and auto_conexion_resultado.get("conectado"):
+                    print(f"✅✅✅ AUTO-CONEXIÓN VERIFICADA")
+                    print(f"   • Session ID: {auto_conexion_resultado.get('session_id')}")
+                    print(f"   • IP asignada: {auto_conexion_resultado.get('ip')}")
+                elif auto_conexion_resultado and auto_conexion_resultado.get("success"):
+                    print(f"⚠️  AUTO-LOGIN EJECUTADO PERO NO VERIFICADO")
+                else:
+                    print(f"⚠️  AUTO-CONEXIÓN FALLÓ PARCIALMENTE")
+                    print(f"   • Error: {auto_conexion_resultado.get('error')}")
+                    
+            except Exception as auto_connect_error:
+                print(f"⚠️  ERROR EN AUTO-CONEXIÓN:")
+                print(f"   • Tipo: {type(auto_connect_error).__name__}")
+                print(f"   • Mensaje: {str(auto_connect_error)}")
+                auto_conexion_resultado = {
+                    "success": False,
+                    "conectado": False,
+                    "error": str(auto_connect_error)
+                }
+        
+        # 8. Construir info de auto-conexión
+        auto_conexion_info = construir_respuesta_auto_conexion(
+            auto_connect_requested=auto_connect_requested,
+            mac_address=payment_data.mac_address,
+            ip_address=payment_data.ip_address,
+            auto_conexion_resultado=auto_conexion_resultado
+        )
+        
+        # 9. Construir y retornar respuesta
         response_data = {
-            "success": es_valido,
+            "success": True,
             "id_transaccion": transaccion.transaccion_id,
             "estado_pago": payment_result["status"],
             "tipo_usuario": user_type,
+            "usuario_hotspot": {
+                "usuario": credentials["username"],
+                "contrasena": credentials["password"]
+            },
             "producto": {
                 "nombre": producto.nombre_venta,
                 "precio": float(producto.precio),
@@ -313,39 +356,23 @@ async def pagar_hotspot_mercado_pago(
                 "status_detail": payment_result.get("status_detail"),
                 "installments": payment_data.installments,
                 "payment_method": payment_result.get("payment_method", {}),
-                "ticket_url": payment_result.get("transaction_details", {}).get("external_resource_url") 
-                              if payment_result.get("status") == "pending" else None,
-                "raw_response": payment_result.get("raw_response", {})
+                "raw_response": payment_result.get("raw_response", {})  # Para debugging
             },
             "timestamp": datetime.utcnow().isoformat(),
             "auto_conexion": auto_conexion_info
         }
         
-        # CREDENCIALES: siempre presente, pero vacío si no aprobado
-        if es_valido:
-            response_data["usuario_hotspot"] = {
-                "usuario": credentials["username"],
-                "contrasena": credentials["password"]
-            }
-        else:
-            response_data["usuario_hotspot"] = {
-                "usuario": "",
-                "contrasena": ""
-            }
-            response_data["warning"] = mensaje_error
-            
-            # Rollback solo si rechazado
-            if payment_result["status"] in ["rejected", "cancelled"]:
-                print(f"🔄 ROLLBACK: Pago rechazado → eliminando usuario")
-                await rollback_usuario(router, credentials["username"], user_type)
+        # Si el pago está pendiente, agregar advertencia
+        if payment_result["status"] == "pending" and "warning" in payment_result:
+            response_data["advertencia"] = payment_result["warning"]
         
         print(f"\n📤 ENVIANDO RESPUESTA AL CLIENTE")
-        print(f"   • Success: {response_data['success']}")
+        print(f"   • ID Transacción: {response_data['id_transaccion']}")
         print(f"   • Estado: {response_data['estado_pago']}")
-        print(f"   • Usuario hotspot: {'***' if es_valido else '(vacío)'}")
+        print(f"   • Usuario: {response_data['usuario_hotspot']['usuario']}")
         
         print("\n" + "="*70)
-        print("🎉 PROCESO COMPLETADO")
+        print("🎉 PROCESO COMPLETADO EXITOSAMENTE")
         print("="*70 + "\n")
         
         return response_data

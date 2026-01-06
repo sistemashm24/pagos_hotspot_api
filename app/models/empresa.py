@@ -21,6 +21,9 @@ class Empresa(Base):
     mercado_pago_public_key = Column(String(255), nullable=True)
     mercado_pago_mode = Column(String(20), default='test')  # 'test' o 'live'
 
+      # NUEVO: CLAVE SECRETA PARA WEBHOOK (IMPORTANTE)
+    mercado_pago_webhook_secret = Column(String(255), nullable=True)
+
     activa = Column(Boolean, default=True)
     creada_en = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
     

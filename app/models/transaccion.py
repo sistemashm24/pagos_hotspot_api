@@ -1,4 +1,6 @@
+# app/models/transaccion.py
 from sqlalchemy import Column, Integer, String, Boolean, TIMESTAMP, DECIMAL, ForeignKey, Index
+from sqlalchemy.dialects.postgresql import JSONB  # Importar JSONB para PostgreSQL
 from sqlalchemy.orm import relationship
 from sqlalchemy import text
 from ..core.database import Base
@@ -8,37 +10,37 @@ class Transaccion(Base):
     
     id = Column(Integer, primary_key=True)
     transaccion_id = Column(String(100), unique=True)
+    external_reference = Column(String(256), unique=True)
     empresa_id = Column(String(50), ForeignKey("empresas.id"), nullable=False)
     router_id = Column(String(50), ForeignKey("routers.id"), nullable=False)
     producto_id = Column(Integer, ForeignKey("productos.id"))
     
-    # Datos del pago
     monto = Column(DECIMAL(10, 2), nullable=False)
     moneda = Column(String(3), default="MXN")
     
-    # Datos del cliente final
     cliente_nombre = Column(String(100))
     cliente_email = Column(String(100))
     cliente_telefono = Column(String(20))
     
-    # Credenciales generadas
     usuario_hotspot = Column(String(50))
     password_hotspot = Column(String(50))
     expiracion_hotspot = Column(TIMESTAMP)
     
-    # Estados
     estado_pago = Column(String(20), default="pending")
     estado_hotspot = Column(String(20), default="pending")
     
-    # Auditoría
+    # 🔴 CAMBIO: metadata -> metadata_json (o cualquier otro nombre)
+    notification_id = Column(String(100))
+    webhook_processed = Column(Boolean, default=False)
+    metadata_json = Column(JSONB, default=dict)  # Cambiado de metadata a metadata_json
+    
     api_key_usada = Column(String(64))
     
-    # Timestamps
     creada_en = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
     pagada_en = Column(TIMESTAMP)
     usuario_creado_en = Column(TIMESTAMP)
+    webhook_received_at = Column(TIMESTAMP)
     
-    # Relaciones
     empresa = relationship("Empresa", back_populates="transacciones")
     router = relationship("Router", back_populates="transacciones")
     producto = relationship("Producto", back_populates="transacciones")
@@ -48,7 +50,9 @@ class Transaccion(Base):
         Index('idx_transacciones_router', 'router_id'),
         Index('idx_transacciones_producto', 'producto_id'),
         Index('idx_transacciones_estado_pago', 'estado_pago'),
-        Index('idx_transacciones_creada_en', 'creada_en')
+        Index('idx_transacciones_creada_en', 'creada_en'),
+        Index('idx_transacciones_external_reference', 'external_reference'),
+        Index('idx_transacciones_webhook_processed', 'webhook_processed'),
     )
     
     def __repr__(self):

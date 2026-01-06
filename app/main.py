@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 
+
 print("\n=== CARGANDO MÓDULOS ===")
 
 # Diccionario de módulos a cargar (ACTUALIZADO CON MERCADO PAGO)
@@ -80,6 +81,12 @@ modulos_config = {
         "router_name": "router",
         "prefix": "/admin",
         "tags": ["Super Admin - Usuarios"]
+    },
+    # ✅ NUEVO: Webhook de Mercado Pago
+    "app.api.v1.webhooks": {
+        "router_name": "router",
+        "prefix": "/api/v1/webhook",
+        "tags": ["Webhooks"]
     }
 }
 

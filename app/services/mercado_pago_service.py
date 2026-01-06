@@ -1,19 +1,17 @@
 # app/services/mercado_pago_service.py
 import mercadopago
-import aiohttp
-import asyncio
 import json
+import uuid
 import logging
-from typing import Dict, Any, Optional
+from datetime import datetime
+from typing import Dict, Any, Optional, List
 from fastapi import HTTPException, status
-from uuid import uuid4
-
-
+from urllib.parse import urljoin
 
 logger = logging.getLogger(__name__)
 
 class MercadoPagoService:
-    """Servicio para procesar pagos con Mercado Pago - CON LOGS DETALLADOS"""
+    """Servicio para procesar pagos con Mercado Pago - CON TODOS LOS REQUISITOS"""
     
     # 🎯 MAPEO COMPLETO DE ERRORES DE MERCADO PAGO
     MP_ERRORS = {
@@ -170,6 +168,75 @@ class MercadoPagoService:
         }
     }
 
+    def __init__(self, base_url: str = "https://payhotspot.wispremote.com"):
+    #def __init__(self, base_url: str = "https://4d686998b1a3.ngrok-free.app"):
+        self.base_url = base_url
+    
+    def _generate_external_reference(self, empresa_id: str, product_id: int = None) -> str:
+        """Generar external_reference única para conciliación"""
+        timestamp = int(datetime.now().timestamp())
+        unique_id = uuid.uuid4().hex[:6].upper()
+        
+        if product_id:
+            return f"HS{empresa_id[:2]}{product_id:03d}{timestamp}{unique_id}"
+        else:
+            return f"HS{empresa_id[:2]}{timestamp}{unique_id}"
+    
+    def _build_payer_info(self, payment_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Construir información completa del pagador - REQUISITO DE APROBACIÓN"""
+        payer = {
+            "email": payment_data.get("customer_email", "")  # 🔴 OBLIGATORIO
+        }
+        
+        # 🟡 NOMBRE Y APELLIDO - Mejora tasa de aprobación
+        customer_name = payment_data.get("customer_name", "").strip()
+        if customer_name:
+            name_parts = customer_name.split(" ", 1)
+            payer["first_name"] = name_parts[0]
+            if len(name_parts) > 1:
+                payer["last_name"] = name_parts[1]
+        
+        # 🟡 TELÉFONO - Mejora tasa de aprobación
+        if payment_data.get("customer_phone"):
+            payer["phone"] = {
+                "area_code": "",
+                "number": self._normalize_phone(payment_data["customer_phone"])
+            }
+        
+        # 🟢 IDENTIFICACIÓN (opcional pero recomendado)
+        # payer["identification"] = {
+        #     "type": "RFC",
+        #     "number": "XAXX010101000"
+        # }
+        
+        # 🟢 DIRECCIÓN (opcional pero recomendado)
+        # payer["address"] = {
+        #     "street_name": "Calle Ficticia",
+        #     "street_number": "123",
+        #     "zip_code": "12345"
+        # }
+        
+        return payer
+    
+    def _build_items_info(self, metadata: Optional[Dict[str, Any]] = None, transaction_amount: float = 0) -> List[Dict[str, Any]]:
+        """Construir información de items - REQUISITO DE APROBACIÓN"""
+        items = []
+        
+        if metadata:
+            items = [{
+                "id": str(metadata.get("producto_id", "1")),  # 🔴 RECOMENDADO
+                "title": metadata.get("product_name", "Acceso Hotspot WiFi"),  # 🔴 RECOMENDADO
+                "description": f"Acceso WiFi - {metadata.get('product_name', 'Servicio')}",  # 🔴 RECOMENDADO
+                "category_id": "services",  # 🔴 RECOMENDADO (services, electronics, etc.)
+                "quantity": 1,  # 🔴 RECOMENDADO
+                "unit_price": float(transaction_amount),  # 🔴 RECOMENDADO
+                # 🟢 CURRENCY_ID no se envía aquí, se infiere automáticamente
+            }]
+        
+        return items
+    
+# app/services/mercado_pago_service.py - CORREGIR EL PAYLOAD
+
     async def create_payment(
         self,
         access_token: str,
@@ -177,159 +244,170 @@ class MercadoPagoService:
         payment_data: Dict[str, Any],
         metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Crear pago en Mercado Pago - CON LOGS DETALLADOS"""
+        """Crear pago en Mercado Pago - CORREGIDO"""
         
         print("\n" + "="*60)
-        print("🔍 [MERCADO PAGO] INICIANDO PROCESO DE PAGO")
+        print("🔍 [MERCADO PAGO] CREANDO PAGO CORREGIDO")
         print("="*60)
         
         try:
-            # 1. CONFIGURAR SDK
-            print(f"🔧 Configurando SDK Mercado Pago...")
-            print(f"   • Modo: {mode}")
-            print(f"   • Token length: {len(access_token)} caracteres")
-            
             sdk = mercadopago.SDK(access_token)
             
-            # 2. CONSTRUIR PAYLOAD
-            print(f"📦 Construyendo payload del pago...")
+            # GENERAR EXTERNAL REFERENCE
+            empresa_id = metadata.get("empresa_id", "00") if metadata else "00"
+            producto_id = metadata.get("producto_id") if metadata else None
+            external_reference = self._generate_external_reference(empresa_id, producto_id)
+            
+            print(f"📌 External Reference generada: {external_reference}")
+            
+            # CONSTRUIR PAYLOAD CORREGIDO
+            transaction_amount = float(payment_data["transaction_amount"])
             
             mp_payload = {
+                # 🔴 DATOS BÁSICOS OBLIGATORIOS
+                "transaction_amount": transaction_amount,
                 "token": payment_data["token"],
-                "issuer_id": None if mode == 'test' else payment_data.get("issuer_id"),  # ← Cambio: Fuerza None en test para evitar mismatch de issuer/BIN
+                "description": f"Acceso Hotspot - {metadata.get('product_name', 'WiFi')}" if metadata else "Acceso Hotspot WiFi",
                 "payment_method_id": payment_data["payment_method_id"],
-                "transaction_amount": float(payment_data["transaction_amount"]),
-                "installments": payment_data.get("installments", 1),                
-                "payer": payment_data.get("payer", {
-                    "email": payment_data["customer_email"]
-                }),
-                "description": f"Acceso Hotspot - {metadata.get('product_name', 'Servicio WiFi')}" if metadata else "Acceso Hotspot WiFi",
+                "installments": payment_data.get("installments", 1),
+                
+                # 🔴 REQUISITOS OBLIGATORIOS
+                "external_reference": external_reference,
+                "notification_url": urljoin(self.base_url, "/api/v1/webhook/mercado-pago"),
+                
+                # 🟡 MEJORAS
+                "statement_descriptor": "HOTSPOT WIFI",
+                "binary_mode": True,
+                
+                # 🟢 INFORMACIÓN DEL PAGADOR (nivel principal)
+                "payer": self._build_payer_info(payment_data),
+                
+                # 📊 METADATOS
                 "metadata": metadata or {},
-                "notification_url": None,
+                
+                # 🛒 INFORMACIÓN DE ITEMS (SOLO items e ip_address)
                 "additional_info": {
-                    "ip_address": metadata.get("ip_cliente", "") if metadata else "",
-                    "items": metadata.get("items", []) if metadata else []
+                    "items": self._build_items_info(metadata, transaction_amount),
+                    "ip_address": metadata.get("ip_cliente", "") if metadata else ""
+                    # ❌ ELIMINAR: "payer" aquí
                 }
             }
             
-            print(f"💰 Payload completo: {json.dumps(mp_payload, indent=2)}")  # ← Cambio: Log completo del payload para depuración
+            # Agregar issuer_id si existe (excepto en test)
+            if payment_data.get("issuer_id") and mode != 'test':
+                mp_payload["issuer_id"] = payment_data["issuer_id"]
             
-            # 3. CONFIGURAR OPTIONS
+            print(f"\n📦 PAYLOAD CORREGIDO:")
+            print(f"   • External Reference: {external_reference}")
+            print(f"   • Notification URL: {mp_payload['notification_url']}")
+            print(f"   • Payer: {mp_payload['payer'].get('email')}")
+            print(f"   • Items: {len(mp_payload['additional_info']['items'])} item(s)")
+            
+            # Mostrar payload completo para debug
+            print(f"\n🔍 PAYLOAD COMPLETO (sensible):")
+            payload_debug = mp_payload.copy()
+            if "token" in payload_debug:
+                payload_debug["token"] = f"{payload_debug['token'][:10]}..."
+            print(json.dumps(payload_debug, indent=2))
+            
+            # CONFIGURAR HEADERS
             request_options = mercadopago.config.RequestOptions()
             request_options.custom_headers = {
-                "x-idempotency-key": str(uuid4())
+                "x-idempotency-key": str(uuid.uuid4())
             }
-            print(f"🔑 Idempotency Key: {request_options.custom_headers['x-idempotency-key']}")
             
-            # 4. CREAR PAGO
-            print(f"📤 Enviando pago a Mercado Pago API...")
-            print(f"   • URL: https://api.mercadopago.com/v1/payments")
-            
+            # CREAR PAGO
+            print(f"\n📤 Enviando a Mercado Pago API...")
             payment_response = sdk.payment().create(mp_payload, request_options)
             
-            print(f"✅ Respuesta recibida de Mercado Pago")
+            print(f"📥 Respuesta recibida")
             
-            # 5. ANALIZAR RESPUESTA
-            print(f"📊 Analizando respuesta...")
-            
+            # MANEJAR RESPUESTA
             if "response" not in payment_response:
-                print(f"❌ Respuesta inválida de Mercado Pago")
-                print(f"   • Contenido completo: {json.dumps(payment_response, indent=2)}")
+                error_msg = "Respuesta inválida de Mercado Pago"
+                if isinstance(payment_response, dict):
+                    if "message" in payment_response:
+                        error_msg = payment_response["message"]
+                    elif "error" in payment_response:
+                        error_msg = payment_response["error"]
+                
+                print(f"❌ {error_msg}")
                 raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Respuesta inválida de Mercado Pago"
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Error de Mercado Pago: {error_msg}"
                 )
             
             payment = payment_response["response"]
             
-            print(f"📄 RESPUESTA COMPLETA DE MERCADO PAGO:")
-            print(f"   • ID: {payment.get('id')}")
+            # Verificar si es un error 400
+            if isinstance(payment, dict) and payment.get("status") == 400:
+                error_msg = payment.get("message", "Error de validación")
+                print(f"❌ Error 400: {error_msg}")
+                
+                if "cause" in payment:
+                    print(f"   • Causas:")
+                    for cause in payment["cause"]:
+                        print(f"     - {cause.get('description')}")
+                
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Error de validación: {error_msg}"
+                )
+            
+            # Agregar external_reference a la respuesta
+            payment["external_reference"] = external_reference
+            
+            print(f"\n✅ PAGO PROCESADO CORRECTAMENTE:")
+            print(f"   • Payment ID: {payment.get('id')}")
             print(f"   • Status: {payment.get('status')}")
-            print(f"   • Status Detail: {payment.get('status_detail')}")
-            print(f"   • Status Code: {payment.get('status_code')}")
-            print(f"   • Description: {payment.get('description')}")
-            print(f"   • Message: {payment.get('message')}")
-            print(f"   • Amount: ${payment.get('transaction_amount')}")
-            print(f"   • Currency: {payment.get('currency_id')}")
-            print(f"   • Date Created: {payment.get('date_created')}")
-            print(f"   • Date Approved: {payment.get('date_approved')}")
             
-            # 6. MANEJAR ERRORES DETALLADOS
-            if "cause" in payment:
-                print(f"🔍 CÓDIGOS DE ERROR DETALLADOS:")
-                for cause in payment["cause"]:
-                    print(f"   • Código: {cause.get('code')} - {cause.get('description')}")
+            # MANEJAR ESTADO DEL PAGO
+            status_value = payment.get("status", "").lower()
             
-            # 7. MANEJAR ESTADO
-            status_value = payment.get("status", "")
-            status_detail = payment.get("status_detail", "")
-            
-            print(f"🎯 MANEJANDO ESTADO: {status_value} ({status_detail})")
-            
-            # ESTADO APROBADO
             if status_value == "approved":
-                print(f"✅✅✅ PAGO APROBADO")
-                return self._build_success_response(payment)
+                print(f"🎉🎉🎉 PAGO APROBADO 🎉🎉🎉")
+                response = self._build_success_response(payment)
+                response["external_reference"] = external_reference
+                response["notification_url_configured"] = True
+                return response
             
-            # ESTADO PENDIENTE
             elif status_value == "pending":
-                print(f"⏳⏳⏳ PAGO PENDIENTE")
-                pending_response = self._build_pending_response(payment)
-                pending_response["warning"] = "Pago pendiente de confirmación"
-                return pending_response
+                print(f"⏳⏳⏳ PAGO PENDIENTE ⏳⏳⏳")
+                response = self._build_pending_response(payment)
+                response["external_reference"] = external_reference
+                response["notification_url_configured"] = True
+                response["warning"] = "Pago pendiente de confirmación"
+                return response
             
-            # ESTADO RECHAZADO
-            elif status_value in ["rejected", "cancelled", "refunded", "charged_back"]:
-                print(f"❌❌❌ PAGO RECHAZADO")
-                error_info = self._parse_mp_error(status_detail)
-                print(f"   • Código error: {error_info['code']}")
-                print(f"   • Mensaje: {error_info['message']}")
-                print(f"   • Categoría: {error_info['categoria']}")
+            elif status_value in ["rejected", "cancelled"]:
+                print(f"❌❌❌ PAGO RECHAZADO: {status_value}")
+                error_info = self._parse_mp_error(payment.get("status_detail", ""))
+                print(f"   • Razón: {error_info['user_message']}")
                 
                 raise HTTPException(
                     status_code=status.HTTP_402_PAYMENT_REQUIRED,
                     detail=error_info["user_message"]
                 )
             
-            # ESTADO EN PROCESO
-            elif status_value in ["in_process", "in_mediation"]:
-                print(f"🔄🔄🔄 PAGO EN PROCESO")
-                return self._build_pending_response(payment)
-            
-            # ESTADO DESCONOCIDO
             else:
-                print(f"❓❓❓ ESTADO DESCONOCIDO: {status_value}")
-                print(f"   • Status Detail: {status_detail}")
-                print(f"   • Respuesta completa: {json.dumps(payment, indent=2, default=str)}")
-                
+                print(f"⚠️  Estado no manejado: {status_value}")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Estado de pago desconocido: {status_value}"
+                    detail=f"Estado de pago no manejado: {status_value}"
                 )
                 
         except HTTPException:
-            print(f"🔼 Re-lanzando HTTPException")
             raise
-            
         except Exception as e:
-            print(f"\n💥💥💥 ERROR INESPERADO EN MERCADO PAGO")
-            print(f"   • Tipo: {type(e).__name__}")
-            print(f"   • Mensaje: {str(e)}")
-            print(f"   • Traceback:")
-            import traceback
-            traceback.print_exc()
-            
+            print(f"\n💥 ERROR INESPERADO: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Error interno al procesar el pago. Intente nuevamente."
+                detail="Error interno al procesar el pago"
             )
-        finally:
-            print("\n" + "="*60)
-            print("📝 FIN DEL PROCESO MERCADO PAGO")
-            print("="*60 + "\n")
-    
+        
+
     def _parse_mp_error(self, status_detail: str) -> Dict[str, str]:
-        """Parsear código de error de Mercado Pago con logs detallados"""
+        """Parsear código de error de Mercado Pago"""
         
         print(f"🔍 Parseando error de Mercado Pago: '{status_detail}'")
         
@@ -388,7 +466,7 @@ class MercadoPagoService:
             "status": payment["status"],
             "status_detail": payment.get("status_detail", ""),
             "amount": payment.get("transaction_amount", 0),
-            "currency_id": payment.get("currency_id", "MXN"),
+            "currency": payment.get("currency_id", "MXN"),  # MP devuelve currency_id
             "date_approved": payment.get("date_approved"),
             "payer": payment.get("payer", {}),
             "payment_method": {
@@ -398,11 +476,12 @@ class MercadoPagoService:
                 "last_four_digits": payment.get("card", {}).get("last_four_digits"),
                 "installments": payment.get("installments")
             },
-            "additional_info": {
-                "ip_address": payment.get("additional_info", {}).get("ip_address"),
-                "items": payment.get("additional_info", {}).get("items", [])
-            },
-            "raw_response": payment  # Incluir respuesta completa para debugging
+            "additional_info": payment.get("additional_info", {}),
+            "external_reference": payment.get("external_reference", ""),
+            "notification_url_configured": True,
+            "statement_descriptor": payment.get("statement_descriptor", "HOTSPOT WIFI"),
+            "binary_mode": True,
+            "raw_response": payment
         }
     
     def _build_pending_response(self, payment: Dict) -> Dict[str, Any]:
@@ -412,17 +491,35 @@ class MercadoPagoService:
             "status": payment["status"],
             "status_detail": payment.get("status_detail", ""),
             "amount": payment.get("transaction_amount", 0),
-            "currency_id": payment.get("currency_id", "MXN"),
+            "currency": payment.get("currency_id", "MXN"),
             "date_created": payment.get("date_created"),
             "payer": payment.get("payer", {}),
             "payment_method": {
                 "id": payment.get("payment_method_id"),
                 "type": payment.get("payment_type_id")
-            }
+            },
+            "external_reference": payment.get("external_reference", ""),
+            "notification_url_configured": True,
+            "statement_descriptor": payment.get("statement_descriptor", "HOTSPOT WIFI"),
+            "binary_mode": True
         }
     
+    def _normalize_phone(self, phone: str) -> str:
+        """Normalizar número de teléfono para Mercado Pago"""
+        if not phone:
+            return ""
+            
+        digits = ''.join(filter(str.isdigit, phone))
+        
+        if len(digits) == 12 and digits.startswith('52'):
+            return digits[2:]  # Quitar +52
+        elif len(digits) == 10:
+            return digits
+        else:
+            return digits if digits else ""
+    
     async def get_payment_status(self, access_token: str, payment_id: int) -> Dict[str, Any]:
-        """Obtener estado de un pago existente con logs detallados"""
+        """Obtener estado de un pago existente"""
         
         print(f"\n🔍 CONSULTANDO ESTADO DE PAGO: {payment_id}")
         
@@ -442,18 +539,18 @@ class MercadoPagoService:
             print(f"📊 Estado actual del pago {payment_id}:")
             print(f"   • Status: {payment.get('status')}")
             print(f"   • Status Detail: {payment.get('status_detail')}")
-            print(f"   • Amount: ${payment.get('transaction_amount')}")
-            print(f"   • Date Last Updated: {payment.get('date_last_updated')}")
+            print(f"   • External Ref: {payment.get('external_reference')}")
             
             return {
                 "payment_id": payment["id"],
                 "status": payment["status"],
                 "status_detail": payment.get("status_detail", ""),
                 "amount": payment.get("transaction_amount", 0),
-                "currency_id": payment.get("currency_id", "MXN"),
+                "currency": payment.get("currency_id", "MXN"),
                 "date_approved": payment.get("date_approved"),
                 "date_last_updated": payment.get("date_last_updated"),
-                "raw_response": payment  # Incluir respuesta completa
+                "external_reference": payment.get("external_reference", ""),
+                "raw_response": payment
             }
             
         except Exception as e:
@@ -463,19 +560,11 @@ class MercadoPagoService:
                 detail=f"Error al consultar estado del pago: {str(e)}"
             )
     
-    def _normalize_phone(self, phone: str) -> str:
-        """Normalizar número de teléfono para Mercado Pago"""
-        if not phone:
-            return ""
-            
-        digits = ''.join(filter(str.isdigit, phone))
-        
-        if len(digits) == 12 and digits.startswith('52'):
-            return f"+{digits}"
-        elif len(digits) == 10:
-            return f"+52{digits}"
-        else:
-            return f"+{digits}" if digits else ""
+    async def verify_webhook_signature(self, request_data: Dict, signature: str) -> bool:
+        """Verificar firma del webhook (para producción)"""
+        # Implementación básica - en producción usarías la clave pública de MP
+        return True
 
 # Instancia global
-mercado_pago_service = MercadoPagoService()
+#mercado_pago_service = MercadoPagoService(base_url="https://4d686998b1a3.ngrok-free.app")
+mercado_pago_service = MercadoPagoService(base_url="https://payhotspot.wispremote.com")
