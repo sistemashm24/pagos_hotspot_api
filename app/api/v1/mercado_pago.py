@@ -407,6 +407,7 @@ async def pagar_hotspot_mercado_pago(
             user_type=user_type
         )
         raise error_exception
+   
     
 @router.get("/estado-pago/{payment_id}",
     summary="Consultar estado de un pago de Mercado Pago",

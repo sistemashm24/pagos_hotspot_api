@@ -466,7 +466,7 @@ class MercadoPagoService:
             "status": payment["status"],
             "status_detail": payment.get("status_detail", ""),
             "amount": payment.get("transaction_amount", 0),
-            "currency": payment.get("currency_id", "MXN"),  # MP devuelve currency_id
+            "currency_id": payment.get("currency_id", "MXN"),  # MP devuelve currency_id
             "date_approved": payment.get("date_approved"),
             "payer": payment.get("payer", {}),
             "payment_method": {
@@ -518,53 +518,94 @@ class MercadoPagoService:
         else:
             return digits if digits else ""
     
+    # En mercado_pago_service.py, método get_payment_status
     async def get_payment_status(self, access_token: str, payment_id: int) -> Dict[str, Any]:
         """Obtener estado de un pago existente"""
         
         print(f"\n🔍 CONSULTANDO ESTADO DE PAGO: {payment_id}")
+        print(f"   • Access Token: {access_token[:20]}...")
         
         try:
             sdk = mercadopago.SDK(access_token)
             response = sdk.payment().get(payment_id)
             
-            if "response" not in response:
-                print(f"❌ Respuesta inválida para pago {payment_id}")
+            print(f"📥 RESPONSE TYPE: {type(response)}")
+            print(f"📥 RESPONSE KEYS: {response.keys() if isinstance(response, dict) else 'NOT DICT'}")
+            print(f"📥 RESPONSE COMPLETA: {json.dumps(response, indent=2)}")
+            
+            # Verificar si es un error
+            if isinstance(response, dict) and response.get("status") == 400:
+                error_msg = response.get("message", "Error desconocido")
+                print(f"❌ Error 400 de Mercado Pago: {error_msg}")
                 raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Pago no encontrado"
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Error de Mercado Pago: {error_msg}"
                 )
             
-            payment = response["response"]
+            if "response" not in response:
+                print(f"❌ Respuesta inválida para pago {payment_id}")
+                print(f"   Respuesta: {response}")
+                
+                # Puede que la respuesta venga directamente en response
+                if isinstance(response, dict) and "id" in response:
+                    print(f"✅ Encontrado 'id' directamente en respuesta")
+                    payment = response
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Pago no encontrado en Mercado Pago"
+                    )
+            else:
+                payment = response["response"]
             
-            print(f"📊 Estado actual del pago {payment_id}:")
+            print(f"📊 PAGO ENCONTRADO:")
+            print(f"   • ID: {payment.get('id')}")
             print(f"   • Status: {payment.get('status')}")
-            print(f"   • Status Detail: {payment.get('status_detail')}")
-            print(f"   • External Ref: {payment.get('external_reference')}")
+            print(f"   • Todas las claves: {list(payment.keys())}")
             
-            return {
-                "payment_id": payment["id"],
-                "status": payment["status"],
+            # Construir respuesta segura
+            result = {
+                "payment_id": payment.get("id", payment_id),
+                "status": payment.get("status", "unknown"),
                 "status_detail": payment.get("status_detail", ""),
                 "amount": payment.get("transaction_amount", 0),
-                "currency": payment.get("currency_id", "MXN"),
                 "date_approved": payment.get("date_approved"),
                 "date_last_updated": payment.get("date_last_updated"),
                 "external_reference": payment.get("external_reference", ""),
                 "raw_response": payment
             }
             
+            # Manejar currency_id
+            if "currency_id" in payment:
+                result["currency_id"] = payment["currency_id"]
+            elif "currency" in payment:
+                result["currency_id"] = payment["currency"]
+            else:
+                result["currency_id"] = "MXN"
+            
+            return result
+            
+        except HTTPException:
+            raise
         except Exception as e:
             print(f"❌ Error consultando estado del pago {payment_id}: {str(e)}")
+            import traceback
+            traceback.print_exc()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Error al consultar estado del pago: {str(e)}"
             )
-    
+
+
     async def verify_webhook_signature(self, request_data: Dict, signature: str) -> bool:
         """Verificar firma del webhook (para producción)"""
         # Implementación básica - en producción usarías la clave pública de MP
         return True
 
+
+
+
+###########
 # Instancia global
 #mercado_pago_service = MercadoPagoService(base_url="https://4d686998b1a3.ngrok-free.app")
 mercado_pago_service = MercadoPagoService(base_url="https://payhotspot.wispremote.com")
