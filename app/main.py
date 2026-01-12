@@ -48,6 +48,12 @@ modulos_config = {
         "prefix": "/api/v1",
         "tags": ["Catalog"]
     },
+    # ✅ NUEVO: Endpoint de Reconexión Automática Hotspot
+    "app.api.v1.hotspot.auto_reconnect": {
+        "router_name": "router", 
+        "prefix": "/api/v1",
+        "tags": ["Hotspot - Reconexión Automática"]
+    },
     
     # Cliente Admin
     "app.api.v1.admin.empresa": {

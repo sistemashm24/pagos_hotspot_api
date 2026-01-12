@@ -28,34 +28,39 @@ class MikroTikService:
         Returns:
             Dict con username y password (password vacío para PIN)
         """
+        PREFIX = "PT-"
+
         # Normalizar user_type
         if user_type not in ["usuario_contrasena", "pin"]:
             user_type = "usuario_contrasena"
-            print(f"⚠️  Tipo de usuario inválido, usando 'usuario_contrasena' por defecto")
+            print("⚠️  Tipo de usuario inválido, usando 'usuario_contrasena' por defecto")
         
         if user_type == "pin":
             # Generar PIN numérico de 6 dígitos
-            pin = ''.join(random.choices('0123456789', k=6))
-            print(f"🔑 PIN generado: {pin} (sin contraseña)")
+            pin = ''.join(random.choices('0123456789', k=5))
+            username = f"{PREFIX}{pin}"
+            
+            print(f"🔑 PIN generado: {username} (sin contraseña)")
             
             return {
-                "username": pin,
+                "username": username,
                 "password": ""  # Sin contraseña para PIN
             }
         else:
-            # Usuario alfanumérico (comportamiento original)
+            # Usuario alfanumérico
             caracteres = string.ascii_uppercase + string.digits
-            usuario = ''.join(random.choice(caracteres) for _ in range(6))
+            usuario = ''.join(random.choice(caracteres) for _ in range(5))
+            username = f"{PREFIX}{usuario}"
             
             # Contraseña numérica
             contraseña = f"{random.randint(0, 9999):04d}"
             
-            print(f"🔑 Credenciales generadas:")
-            print(f"   Usuario: {usuario}")
+            print("🔑 Credenciales generadas:")
+            print(f"   Usuario: {username}")
             print(f"   Contraseña: {contraseña}")
             
             return {
-                "username": usuario,
+                "username": username,
                 "password": contraseña
             }
     
@@ -133,81 +138,90 @@ class MikroTikService:
         username: str,
         password: str,
         profile_name: str,
-        comment: str = "",  # Mantener para compatibilidad pero ignorar        
+        comment: str = "",
         skip_verification: bool = False,
-        user_type: str = "usuario_contrasena"  # Nuevo parámetro
+        user_type: str = "usuario_contrasena"
     ) -> Dict[str, Any]:
         """
         Crear usuario en Hotspot MikroTik - VERSIÓN CON SOPORTE PARA PIN
-        
-        Args:
-            comment: Ignorado, mantenido solo para compatibilidad
-            skip_verification: Si True, no verifica (más rápido)
-            user_type: Tipo de usuario ("usuario_contrasena" o "pin")
         """
         print(f"👤 Intentando crear usuario: {username} (perfil: {profile_name}, tipo: {user_type})")
-        
-        # Validar formato según tipo de usuario
+
+        PREFIX = "PT-"
+
+        # Validaciones base
+        if not username.startswith(PREFIX):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"El usuario debe iniciar con el prefijo {PREFIX}"
+            )
+
+        core_value = username[len(PREFIX):]  # Parte sin prefijo
+
         if user_type == "pin":
-            # Para PIN: 6 dígitos numéricos
-            if len(username) != 6 or not username.isdigit():
+            # PIN: 5 dígitos numéricos
+            if len(core_value) != 5 or not core_value.isdigit():
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="El PIN debe tener exactamente 6 dígitos numéricos"
+                    detail="El PIN debe contener exactamente 5 dígitos numéricos"
                 )
-            # Para PIN, el password debe estar vacío
-            if password != "":
-                print(f"⚠️  Advertencia: Password no vacío para tipo PIN, ignorando")
-                password = ""  # Forzar vacío para PIN
+
+            # Forzar password vacío
+            if password:
+                print("⚠️ Password ignorado para tipo PIN")
+                password = ""
+
         else:
-            # Para usuario_contrasena: Alfanumérico de 6 caracteres
-            if len(username) != 6:
+            # Usuario + contraseña: 5 caracteres alfanuméricos
+            if len(core_value) != 5 or not core_value.isalnum():
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="El usuario debe tener exactamente 6 caracteres"
+                    detail="El usuario debe contener exactamente 5 caracteres alfanuméricos"
                 )
-            
-            if not username.isalnum():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="El usuario solo puede contener letras y números"
-                )
-            
+
             if len(password) != 4 or not password.isdigit():
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="La contraseña debe tener exactamente 4 dígitos"
+                    detail="La contraseña debe contener exactamente 4 dígitos numéricos"
                 )
-        
+
         try:
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
                 None,
                 self._create_user_sync_optimizado,
-                router_host, router_port, router_user, router_password,
-                username, password, profile_name, skip_verification, user_type
+                router_host,
+                router_port,
+                router_user,
+                router_password,
+                username,
+                password,
+                profile_name,
+                skip_verification,
+                user_type
             )
-            
+
             if not result.get("success"):
-                error_msg = result.get("error", "Error desconocido al crear usuario")
+                error_msg = result.get("error", "Error desconocido")
                 print(f"❌ Falló creación: {error_msg}")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"No se pudo crear el usuario: {error_msg}"
                 )
-            
-            print(f"✅ Usuario {username} creado exitosamente (tipo: {user_type})")
+
+            print(f"✅ Usuario {username} creado exitosamente")
             return result
-            
+
         except HTTPException:
             raise
         except Exception as e:
-            print(f"❌ Error inesperado: {str(e)}")
+            print(f"❌ Error inesperado: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Error al crear usuario: {str(e)}"
             )
-    
+
+
     def _create_user_sync_optimizado(
         self,
         host: str,

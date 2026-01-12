@@ -20,13 +20,14 @@ router = APIRouter(tags=["Pagar Hotspot - Mercado Pago"])
 
 # Reutilizar las funciones auxiliares del endpoint de Conekta
 from app.api.v1.payments import (
-    rollback_usuario,
-    ejecutar_auto_conexion,
+    rollback_usuario,    
     validar_estado_pago_conekta,  # Puedes crear una específica para MP si necesitas
     construir_respuesta_auto_conexion,
     construir_respuesta_exitosa,
     manejar_error_inesperado
 )
+
+from app.hotspot.auto_conexion_pago_tarjeta import ejecutar_auto_conexion
 
 def validar_estado_mercado_pago(payment_result: Dict[str, Any]) -> Tuple[bool, str]:
     """
