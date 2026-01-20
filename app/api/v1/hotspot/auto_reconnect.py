@@ -17,6 +17,8 @@ from app.hotspot.auto_conexion_pago_tarjeta import ejecutar_auto_conexion
 
 from librouteros.query import Key
 
+import traceback
+
 router = APIRouter(tags=["Hotspot - Reconexión Automática"])
 
 # ========== SCHEMAS ==========
@@ -65,7 +67,7 @@ def obtener_info_usuario_sync(
             .path('/ip/hotspot/user')
             .select(
                 '.id', 'name', 'password', 'profile', 'disabled', 'comment',
-                'limit-uptime', 'uptime'  # puedes agregar más campos si los necesitas
+                'limit-uptime', 'uptime','mac-address'  # puedes agregar más campos si los necesitas
             )
             .where(name_key == hotspot_username)
         )
@@ -117,84 +119,54 @@ def obtener_info_usuario_sync(
 
             
 # ========== ENDPOINT PRINCIPAL MEJORADO ==========
-@router.post("/hotspot/auto-reconnect", 
+@router.post(
+    "/hotspot/auto-reconnect",
     summary="Reconexión automática para dispositivos con MAC aleatoria",
-    description="""Sistema de reconexión automática cuando dispositivos cambian de MAC al cambiar entre SSIDs.""",
     response_model=AutoReconnectResponse
 )
 async def auto_reconnect(
     request: AutoReconnectRequest,
-    auth_data = Depends(require_api_key),
+    auth_data=Depends(require_api_key),
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Reconectar automáticamente un usuario cuando cambia su MAC
-    """
-    print("\n" + "="*70)
-    print("🔄 INICIANDO RECONEXIÓN AUTOMÁTICA - VERSIÓN MEJORADA")
-    print("="*70)
-    
-    # require_api_key retorna: (empresa, router, auth_info)
-    empresa, router_mikrotik, auth_info = auth_data
-    
-    print(f"🏢 Empresa: {empresa.nombre} ({empresa.id})")
-    print(f"🌐 Router: {router_mikrotik.host}:{router_mikrotik.puerto}")
-    print(f"👤 Usuario: {request.username}")
-    print(f"📶 MAC nueva: {request.current_mac}")
-    print(f"🌐 IP: {request.current_ip or 'No especificada'}")
-    
-    # Respuesta base (conservando tu estructura original)
+    print("\n" + "=" * 70)
+    print("🔄 INICIANDO RECONEXIÓN AUTOMÁTICA")
+    print("=" * 70)
+
+    empresa, router_mikrotik, _ = auth_data
+
     response_base = {
         "success": False,
         "estado": "error",
         "auto_conexion": "no_conectado",
         "datos_sesion": None,
         "nueva_mac": request.current_mac,
-        "tiempo_acumulado": None,
-        "tiempo_restante": None,
-        "primera_sesion": None,
         "mensaje": None,
         "error_detalle": None,
         "timestamp": datetime.utcnow().isoformat()
     }
-    
+
     try:
-        # ========== 1. VALIDAR EMPRESA ACTIVA ==========
-        print(f"📋 Validando estado de la empresa...")
-        
-        # Verificar si la empresa está activa
-        empresa_activa = getattr(empresa, 'activa', True)
-        if not empresa_activa:
-            print(f"❌ Empresa inactiva: {empresa.nombre}")
-            response_base.update({
-                "estado": "empresa_inactiva",
-                "mensaje": "La empresa no se encuentra activa en el sistema",
-                "error_detalle": "empresa_inactiva"
-            })
+        # ─────────────────────────────────────────────
+        # 1. VALIDACIONES BÁSICAS
+        # ─────────────────────────────────────────────
+        if not getattr(empresa, "activa", True):
+            response_base.update(
+                estado="empresa_inactiva",
+                mensaje="Empresa inactiva"
+            )
             return response_base
-        
-        print(f"✅ Empresa activa: {empresa.nombre}")
-        
-        # ========== 2. VALIDAR ROUTER ACTIVO ==========
-        print(f"📋 Validando estado del router...")
-        
-        # Verificar si el router está activo
-        router_activo = getattr(router_mikrotik, 'activo', True)
-        if not router_activo:
-            print(f"❌ Router inactivo: {router_mikrotik.host}")
-            response_base.update({
-                "estado": "router_inactivo",
-                "mensaje": "El router no se encuentra activo",
-                "error_detalle": "router_inactivo"
-            })
+
+        if not getattr(router_mikrotik, "activo", True):
+            response_base.update(
+                estado="router_inactivo",
+                mensaje="Router inactivo"
+            )
             return response_base
-        
-        print(f"✅ Router activo: {router_mikrotik.host}")
-        
-        # ========== 3. OBTENER INFORMACIÓN DEL USUARIO DESDE MIKROTIK ==========
-        print(f"🔍 Obteniendo información del usuario desde MikroTik...")
-        
-        # Tu función original se conserva intacta
+
+        # ─────────────────────────────────────────────
+        # 2. OBTENER USUARIO DESDE MIKROTIK
+        # ─────────────────────────────────────────────
         info_usuario = await asyncio.get_event_loop().run_in_executor(
             None,
             obtener_info_usuario_sync,
@@ -204,140 +176,166 @@ async def auto_reconnect(
             router_mikrotik.password_encrypted,
             request.username
         )
-        
-        # ========== 4. VERIFICAR SI EL USUARIO EXISTE ==========
-        # Conservando tu lógica original
-        if not info_usuario["existe"]:
-            print(f"❌ Usuario no encontrado en MikroTik")
-            response_base.update({
-                "estado": "expirado",
-                "mensaje": "Usuario no encontrado (probablemente expiró)",
-                "error_detalle": "user_not_found"
-            })
+
+        if not info_usuario.get("existe"):
+            response_base.update(
+                estado="expirado",
+                mensaje="Usuario no encontrado"
+            )
             return response_base
-        
-        # ========== 5. VERIFICAR SI EL USUARIO ESTÁ DESHABILITADO ==========
-        # Conservando tu lógica original
+
         if info_usuario.get("disabled"):
-            print(f"⚠️ Usuario deshabilitado en MikroTik")
-            response_base.update({
-                "estado": "activo",
-                "auto_conexion": "no_conectado",
-                "mensaje": "Usuario deshabilitado",
-                "error_detalle": "user_disabled",
-                "datos_sesion": info_usuario["datos_usuario"]
-            })
+            response_base.update(
+                estado="activo",
+                mensaje="Usuario deshabilitado",
+                datos_sesion=info_usuario["datos_usuario"]
+            )
             return response_base
-        
-        # ========== 6. DETERMINAR TIPO DE USUARIO Y CONTRASEÑA A USAR ==========
-        # Conservando tu lógica original
-        tipo_usuario = info_usuario["tipo_usuario"]
-        password_a_usar = ""
-        
-        if tipo_usuario == "pin":
-            print(f"🔑 Tipo: PIN (sin contraseña)")
-            # Para PIN, no necesitamos contraseña
-            password_a_usar = ""
-        elif tipo_usuario == "usuario_password":
-            print(f"🔑 Tipo: Usuario/Contraseña")
-            # Usar la contraseña obtenida de MikroTik, asegurando que sea string
-            password_a_usar = info_usuario["password"]
-            
-            # Log seguro de la contraseña
-            if password_a_usar:
-                # Mostrar asteriscos en lugar de la contraseña real
-                masked_password = "*" * min(len(str(password_a_usar)), 20)
-                print(f"   • Contraseña obtenida: {masked_password} (longitud: {len(str(password_a_usar))})")
-            else:
-                print(f"   • Contraseña obtenida: (vacía)")
-        else:
-            print(f"⚠️ Tipo de usuario desconocido: {tipo_usuario}")
-        
-        # ========== 7. EXTRAER DATOS ADICIONALES DEL USUARIO ==========
-        # Conservando tu lógica original
-        datos_usuario = info_usuario.get("datos_usuario", {})
-        response_base["datos_sesion"] = datos_usuario
-        response_base["tiempo_acumulado"] = datos_usuario.get("uptime")
-        
-        # Extraer primera sesión de comment si existe
-        comment = datos_usuario.get("comment", "")
-        if "Primera:" in comment:
-            primera_parte = comment.split("Primera:")[1].strip().split()[0]
-            response_base["primera_sesion"] = primera_parte
-        elif "|" in comment:
-            partes = comment.split("|")
-            if len(partes) > 1:
-                response_base["primera_sesion"] = partes[1].strip()
-        
-        # ========== 8. EJECUTAR AUTO-CONEXIÓN USANDO LA FUNCIÓN QUE YA FUNCIONA ==========
-        print(f"🚀 Ejecutando auto-conexión...")
-        
-        # Conservando tu función original
-        resultado_auto_conexion = await ejecutar_auto_conexion(
+
+        datos_usuario = info_usuario["datos_usuario"]
+        comment = (datos_usuario.get("comment") or "").upper()
+
+        # ─────────────────────────────────────────────
+        # USUARIO QUE SE USARÁ PARA LOGIN
+        # ─────────────────────────────────────────────
+        username_login = request.username
+
+        # ─────────────────────────────────────────────
+        # 3. LÓGICA ESPECIAL MODE / TL / TA
+        # ─────────────────────────────────────────────
+        if all(x in comment for x in ("MODE=", "TL=", "TA=")):
+            print("⚠️ Usuario con parámetros especiales")
+
+            api = None
+            try:
+                api = MikrotikAPI(
+                    router_mikrotik.host,
+                    router_mikrotik.puerto,
+                    router_mikrotik.usuario,
+                    router_mikrotik.password_encrypted,
+                    timeout=10
+                )
+                api.open()
+
+                # 3.1 Asignar MAC al usuario original (si no tiene)
+                mac_actual = (datos_usuario.get("mac-address") or "").strip()
+
+                if not mac_actual:
+                    print("   • Usuario sin MAC → buscando cookie")
+
+                    cookies = list(
+                        api.connection
+                        .path("/ip/hotspot/cookie")
+                        .select("mac-address")
+                        .where(Key("user") == request.username)
+                    )
+
+                    if cookies and cookies[0].get("mac-address"):
+                        mac_cookie = cookies[0]["mac-address"].strip()
+                        print(f"   • MAC cookie encontrada: {mac_cookie}")
+
+                        api.connection.path("/ip/hotspot/user").update(
+                            **{
+                                ".id": datos_usuario[".id"],
+                                "mac-address": mac_cookie
+                            }
+                        )
+                
+                # 3.2 Crear usuario copia (_RANDMACn) SIN MAC
+                base_name = request.username
+                ext = 1
+
+                while True:
+                    copy_name = f"{base_name}_RANDMAC{ext}"
+                    existe = list(
+                        api.connection
+                        .path("/ip/hotspot/user")
+                        .select(".id")
+                        .where(Key("name") == copy_name)
+                    )
+                    if not existe:
+                        break
+                    ext += 1
+
+                print(f"   • Creando usuario RANDMAC {copy_name}")
+
+
+                api.connection.path("/ip/hotspot/user").add(
+                    name=copy_name,
+                    password=info_usuario["password"],
+                    profile=datos_usuario.get("profile", "default"),
+                    comment=datos_usuario.get("comment", ""),
+                    disabled="no"
+                )
+
+                # 3.3 Asignar MAC al usuario copia
+                nuevo = list(
+                    api.connection
+                    .path("/ip/hotspot/user")
+                    .select(".id")
+                    .where(Key("name") == copy_name)
+                )
+
+                if nuevo:
+                    api.connection.path("/ip/hotspot/user").update(
+                        **{
+                            ".id": nuevo[0][".id"],
+                            "mac-address": request.current_mac
+                        }
+                    )
+                    print(f"   • MAC {request.current_mac} asignada a {copy_name}")
+
+                    # 👇 ESTE ES EL CAMBIO CLAVE
+                    username_login = copy_name
+
+            except Exception as e:
+                print("💥 Error en lógica especial:", str(e))
+                traceback.print_exc()
+            finally:
+                if api:
+                    api.close()
+
+        # ─────────────────────────────────────────────
+        # 4. FLUJO ORIGINAL (SE MANTIENE)
+        # ─────────────────────────────────────────────
+        password_a_usar = (
+            "" if info_usuario["tipo_usuario"] == "pin"
+            else info_usuario["password"]
+        )
+
+        resultado = await ejecutar_auto_conexion(
             router_host=router_mikrotik.host,
             router_port=router_mikrotik.puerto,
             router_user=router_mikrotik.usuario,
             router_password=router_mikrotik.password_encrypted,
-            username=request.username,
+            username=username_login,  # ✅ ORIGINAL o _EXTn
             password=password_a_usar,
             mac_address=request.current_mac,
             ip_address=request.current_ip
         )
-        
-        # ========== 9. ACTUALIZAR RESPUESTA CON RESULTADO DE AUTO-CONEXIÓN ==========
-        # Conservando tu lógica original
-        conectado = resultado_auto_conexion.get("conectado", False)
-        success = resultado_auto_conexion.get("success", False)
-        
-        response_base.update({
-            "success": success,
-            "estado": "activo",
-            "auto_conexion": "conectado" if conectado else "no_conectado",
-            "mensaje": resultado_auto_conexion.get("mensaje", ""),
-            "error_detalle": resultado_auto_conexion.get("error")
-        })
-        
-        # Si hay sesión activa, agregar información de la sesión
-        if conectado and resultado_auto_conexion.get("session_info"):
-            session_info = resultado_auto_conexion["session_info"]
-            response_base["datos_sesion"] = {
-                **datos_usuario,
-                **session_info
-            }
-            response_base["tiempo_acumulado"] = session_info.get("uptime", datos_usuario.get("uptime"))
-        
-        # ========== 10. LOGS FINALES ==========
-        # Conservando tus logs originales
-        if conectado:
-            print(f"✅✅✅ RECONEXIÓN EXITOSA")
-            print(f"   • Tipo: {tipo_usuario}")
-            print(f"   • Método usado: {resultado_auto_conexion.get('metodo_usado', 'N/A')}")
-        else:
-            print(f"⚠️ AUTO-CONEXIÓN FALLIDA")
-            error_msg = resultado_auto_conexion.get('error', 'Desconocido')
-            print(f"   • Error: {error_msg}")
-        
-        print("\n" + "="*70)
-        print("🏁 PROCESO COMPLETADO")
-        print("="*70)
-        
+
+        response_base.update(
+            success=resultado.get("success", False),
+            estado="activo",
+            auto_conexion="conectado" if resultado.get("conectado") else "no_conectado",
+            mensaje=resultado.get("mensaje"),
+            error_detalle=resultado.get("error"),
+            datos_sesion=resultado.get("session_info", datos_usuario)
+        )
+
         return response_base
-        
-    except HTTPException as http_exc:
-        # Re-lanzar excepciones HTTP
-        raise http_exc
-        
+
     except Exception as e:
-        print(f"\n💥 ERROR INESPERADO: {type(e).__name__}: {str(e)}")
-        import traceback
+        print("💥 ERROR GENERAL:", str(e))
         traceback.print_exc()
-        
-        response_base.update({
-            "mensaje": "Error interno del servidor",
-            "error_detalle": f"server_error: {str(e)}"
-        })
-        
+        response_base.update(
+            mensaje="Error interno del servidor",
+            error_detalle=str(e)
+        )
         return response_base
+
+
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 #                  ENDPOINT: Consulta SEGURA de perfil de usuario hotspot
