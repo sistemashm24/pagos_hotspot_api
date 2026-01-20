@@ -19,349 +19,175 @@ async def ejecutar_auto_conexion_v6(
     ip_address: str = None
 ) -> Dict[str, Any]:
     """
-    Ejecutar auto-conexión en MikroTik usando MAC Cookies
-    → VERSIÓN ORIGINAL que funcionaba correctamente en v6
+    Versión v6 - Login DIRECTO (sin scripts) + limpieza SOLO de sesiones activas por username
     """
-    try:
-        print(f"🔗 [v6 ORIGINAL] Ejecutando auto-conexión para usuario: {username}, MAC: {mac_address}")
-        
-        from app.core.mikrotik_api import MikrotikAPI
-        
-        def conectar_y_verificar():
-            with MikrotikAPI(router_host, router_port, router_user, router_password, timeout=10) as api:
-                # Formatear MAC correctamente
-                mac_formatted = mac_address.lower().replace("-", ":")
-                
-                # PASO 1: BUSCAR EL USUARIO
-                print(f"🔍 Buscando usuario {username}...")
-                all_users = api.connection(cmd="/ip/hotspot/user/print")
-                user_id = None
-                search_name = str(username).strip()
-                
-                for u in all_users:
-                    current_name = str(u.get('name', '')).strip()
-                    if current_name == search_name:
-                        user_id = u.get('.id')
-                        print(f"✅ Usuario encontrado: ID={user_id}")
-                        break
-                
-                if not user_id:
-                    print(f"❌ Usuario {username} no encontrado")
-                    return {
-                        "success": False,
-                        "error": f"Usuario {username} no encontrado en MikroTik",
-                        "conectado": False
-                    }
-                
-                # PASO 2: VINCULAR MAC AL USUARIO
-                print(f"🔗 Vinculando usuario {username} a MAC {mac_formatted}...")
-                try:
-                    update_result = api.connection(
-                        cmd="/ip/hotspot/user/set",
-                        **{
-                            ".id": user_id,
-                            "mac-address": mac_formatted
-                        }
-                    )
-                    list(update_result)
-                    print(f"✅ Usuario vinculado a MAC {mac_formatted}")
-                except Exception as e:
-                    print(f"⚠️ Error vinculando MAC: {e}")
-                
-                # PASO 3: BUSCAR EL HOST
-                print(f"🔍 Buscando host con MAC {mac_formatted} en /ip/hotspot/host...")
-                
-                host_list = api.connection(cmd="/ip/hotspot/host/print")
-                host_id = None
-                host_ip = None
-                host_server = None
-                
-                for host in host_list:
-                    host_mac = host.get('mac-address', '').lower()
-                    
-                    if host_mac == mac_formatted.lower():
-                        host_id = host.get('.id')
-                        host_ip = host.get('address', '')
-                        host_server = host.get('server', '')
-                        host_authorized = host.get('authorized', 'false')
-                        
-                        print(f"✅ Host encontrado:")
-                        print(f"  .id: {host_id}")
-                        print(f"  MAC: {host_mac}")
-                        print(f"  IP: {host_ip}")
-                        print(f"  Server: {host_server}")
-                        print(f"  Autorizado: {host_authorized}")
-                        break
-                
-                if not host_id:
-                    print(f"❌ No se encontró el host con MAC {mac_formatted}")
-                    return {
-                        "success": False,
-                        "error": "Cliente no encontrado en hosts. Debe conectarse a la red WiFi primero.",
-                        "conectado": False
-                    }
-                
-                # PASO 4: 🍪 CREAR/VERIFICAR MAC COOKIE
-                print(f"🍪 Verificando/Creando MAC Cookie para {mac_formatted}...")
-                cookie_created = False
-                cookie_exists = False
-                
-                try:
-                    cookies = api.connection(cmd="/ip/hotspot/cookie/print")
-                    
-                    for cookie in cookies:
-                        cookie_mac = cookie.get('mac-address', '').lower()
-                        cookie_user = cookie.get('user', '')
-                        
-                        if cookie_mac == mac_formatted.lower():
-                            cookie_exists = True
-                            print(f"✅ Cookie existente encontrada: usuario={cookie_user}, MAC={cookie_mac}")
-                            
-                            if cookie_user.lower() != search_name.lower():
-                                print(f"⚠️ Cookie es de otro usuario ({cookie_user}), eliminando...")
-                                try:
-                                    del_result = api.connection(
-                                        cmd="/ip/hotspot/cookie/remove",
-                                        **{".id": cookie.get('.id')}
-                                    )
-                                    list(del_result)
-                                    cookie_exists = False
-                                    print(f"✅ Cookie antigua eliminada")
-                                except Exception as del_error:
-                                    print(f"⚠️ Error eliminando cookie: {del_error}")
-                            break
-                    
-                    if not cookie_exists:
-                        print(f"🆕 Creando nueva MAC Cookie para {username}...")
-                        try:
-                            add_cookie = api.connection(
-                                cmd="/ip/hotspot/cookie/add",
-                                **{
-                                    "mac-address": mac_formatted,
-                                    "user": username
-                                }
-                            )
-                            list(add_cookie)
-                            cookie_created = True
-                            cookie_exists = True
-                            print(f"✅ MAC Cookie creada exitosamente")
-                            print(f"   → Ahora visible en: /ip hotspot cookie")
-                        except Exception as cookie_error:
-                            print(f"⚠️ Error creando cookie: {cookie_error}")
-                            cookie_created = False
-                    else:
-                        print(f"✅ MAC Cookie verificada y válida")
-                        
-                except Exception as cookie_check_error:
-                    print(f"⚠️ Error verificando cookies: {cookie_check_error}")
-                
-                # PASO 5: INTENTAR AUTORIZAR CON MÚLTIPLES MÉTODOS
-                login_success = False
-                metodo_usado = None
-                
-                if host_ip:
-                    print(f"🔐 MÉTODO 1: Intentando login con IP {host_ip} y contraseña...")
-                    try:
-                        login_result = api.connection(
-                            cmd="/ip/hotspot/active/login",
-                            **{
-                                "ip": host_ip,
-                                "user": username,
-                                "password": password
-                            }
-                        )
-                        list(login_result)
-                        login_success = True
-                        metodo_usado = "login con IP + Cookie"
-                        print(f"✅ MÉTODO 1 exitoso: Login con IP {host_ip}")
-                    except Exception as method1_error:
-                        error_msg = str(method1_error).lower()
-                        print(f"⚠️ MÉTODO 1 falló: {method1_error}")
-                        if "already logged in" in error_msg or "already authorized" in error_msg:
-                            login_success = True
-                            metodo_usado = "ya estaba autorizado"
-                            print(f"ℹ️ El host ya está autorizado")
-                
-                if not login_success and host_ip:
-                    print(f"🔐 MÉTODO 2: Intentando login con MAC, IP y contraseña...")
-                    try:
-                        login_result = api.connection(
-                            cmd="/ip/hotspot/active/login",
-                            **{
-                                "mac-address": mac_formatted,
-                                "ip": host_ip,
-                                "user": username,
-                                "password": password
-                            }
-                        )
-                        list(login_result)
-                        login_success = True
-                        metodo_usado = "login con MAC e IP"
-                        print(f"✅ MÉTODO 2 exitoso: Login con MAC e IP")
-                    except Exception as method2_error:
-                        print(f"⚠️ MÉTODO 2 falló: {method2_error}")
-                
-                if not login_success and host_server:
-                    print(f"🔐 MÉTODO 3: Intentando forzar autenticación en servidor {host_server}...")
-                    try:
-                        login_result = api.connection(
-                            cmd="/ip/hotspot/active/login",
-                            **{
-                                "numbers": host_id,
-                                "user": username
-                            }
-                        )
-                        list(login_result)
-                        login_success = True
-                        metodo_usado = "login con numbers"
-                        print(f"✅ MÉTODO 3 exitoso")
-                    except Exception as method3_error:
-                        print(f"⚠️ MÉTODO 3 falló: {method3_error}")
-                
-                if not login_success and host_ip:
-                    print(f"🔐 MÉTODO 4: Intentando login completo con todos los parámetros...")
-                    try:
-                        login_result = api.connection(
-                            cmd="/ip/hotspot/active/login",
-                            **{
-                                "ip": host_ip,
-                                "mac-address": mac_formatted,
-                                "user": username,
-                                "password": password
-                            }
-                        )
-                        list(login_result)
-                        login_success = True
-                        metodo_usado = "login completo"
-                        print(f"✅ MÉTODO 4 exitoso: Login completo")
-                    except Exception as method4_error:
-                        error_msg = str(method4_error).lower()
-                        print(f"⚠️ MÉTODO 4 falló: {method4_error}")
-                        if "already" in error_msg:
-                            login_success = True
-                            metodo_usado = "ya autenticado"
-                
-                if not login_success:
-                    print(f"❌ Todos los métodos de autenticación fallaron")
-                else:
-                    print(f"✅ Autenticación exitosa usando: {metodo_usado}")
-                
-                # PASO 6: VERIFICAR EN SESIONES ACTIVAS
-                print(f"🔍 Verificando sesiones activas en /ip/hotspot/active...")
-                time.sleep(2.5)
-                
-                cliente_en_activos = False
-                session_id = None
-                session_info = {}
-                tiene_cookie = cookie_exists
-                
-                try:
-                    active_sessions = api.connection(cmd="/ip/hotspot/active/print")
-                    
-                    for session in active_sessions:
-                        session_mac = session.get('mac-address', '').lower()
-                        session_ip = session.get('address', '')
-                        session_user = str(session.get('user', '')).strip()
-                        
-                        match_by_mac = session_mac == mac_formatted.lower()
-                        match_by_ip = (host_ip and session_ip == host_ip)
-                        match_by_user = session_user.lower() == search_name.lower()
-                        
-                        if match_by_mac or match_by_ip or match_by_user:
-                            cliente_en_activos = True
-                            session_id = session.get('.id')
-                            session_info = {
-                                'id': session_id,
-                                'user': session.get('user'),
-                                'address': session.get('address'),
-                                'mac': session.get('mac-address'),
-                                'uptime': session.get('uptime', '0s'),
-                                'server': session.get('server', '')
-                            }
-                            
-                            print(f"✅✅✅ CLIENTE AUTENTICADO Y ACTIVO:")
-                            print(f"  Session ID: {session_id}")
-                            print(f"  Usuario: {session.get('user')}")
-                            print(f"  MAC: {session.get('mac-address')}")
-                            print(f"  IP: {session.get('address')}")
-                            print(f"  Uptime: {session.get('uptime', '0s')}")
-                            print(f"  Server: {session.get('server', '')}")
-                            break
-                    
-                    if not cliente_en_activos:
-                        print(f"⚠️ Primera verificación: no encontrado en activos")
-                        print(f"🔄 Esperando 3s más y re-verificando...")
-                        time.sleep(3.0)
-                        
-                        active_sessions = api.connection(cmd="/ip/hotspot/active/print")
-                        for session in active_sessions:
-                            session_mac = session.get('mac-address', '').lower()
-                            session_ip = session.get('address', '')
-                            
-                            if session_mac == mac_formatted.lower() or (host_ip and session_ip == host_ip):
-                                cliente_en_activos = True
-                                session_id = session.get('.id')
-                                session_info = {
-                                    'id': session_id,
-                                    'user': session.get('user'),
-                                    'address': session.get('address'),
-                                    'mac': session.get('mac-address')
-                                }
-                                print(f"✅ Cliente encontrado en segunda verificación")
-                                break
-                
-                except Exception as verify_error:
-                    print(f"⚠️ Error verificando sesiones activas: {verify_error}")
-                
-                # PASO 7: RETORNAR RESULTADO
-                resultado = {
-                    "success": login_success,
-                    "conectado": cliente_en_activos,
-                    "mac": mac_formatted,
-                    "ip": host_ip or ip_address or "",
-                    "username": username,
-                    "host_id": host_id,
-                    "session_id": session_id,
-                    "session_info": session_info if cliente_en_activos else {},
-                    "metodo_usado": metodo_usado,
-                    "cookie_creada": cookie_created,
-                    "tiene_cookie": tiene_cookie,
-                    "auto_login_ejecutado": login_success,
-                    "verificado_en_activos": cliente_en_activos
-                }
-                
-                if cliente_en_activos:
-                    cookie_msg = " 🍪 (Cookie guardada - auto-conexión habilitada)" if tiene_cookie else ""
-                    resultado["mensaje"] = f"✅ Autenticado exitosamente{cookie_msg}"
-                    print(f"🎉 AUTO-CONEXIÓN COMPLETADA Y VERIFICADA")
-                    if tiene_cookie:
-                        print(f"🍪 Cookie guardada en /ip/hotspot/cookie")
-                        print(f"   → Próximas conexiones serán automáticas")
-                elif login_success:
-                    resultado["mensaje"] = f"⏳ Login ejecutado ({metodo_usado}). Verificando..."
-                    print(f"⚠️ Login ejecutado pero no aparece en activos aún")
-                else:
-                    resultado["mensaje"] = "❌ No se pudo autenticar. Use credenciales manualmente."
-                    resultado["error"] = "Todos los métodos fallaron"
-                    print(f"❌ Auto-conexión falló")
-                
-                return resultado
-        
-        loop = asyncio.get_event_loop()
-        resultado = await loop.run_in_executor(None, conectar_y_verificar)
-        return resultado
-        
-    except Exception as e:
-        print(f"❌ Error en auto-conexión v6: {type(e).__name__}: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return {
-            "success": False,
-            "conectado": False,
-            "error": f"Error de conexión: {str(e)}",
-            "mensaje": "Error crítico en auto-conexión"
-        }
+    logger.info(f"[START] auto-login v6 DIRECTO | user={username} | mac={mac_address} | ip={ip_address or 'auto-detect'}")
 
+    from app.core.mikrotik_api import MikrotikAPI
+    
+    def worker():
+        with MikrotikAPI(
+            router_host,
+            router_port,
+            router_user,
+            router_password,
+            timeout=15  # un poco más de margen por si el login tarda
+        ) as api:
+
+            mac = mac_address.lower().replace("-", ":")
+            username_lower = username.strip().lower()
+            logger.info(f"[1] MAC: {mac} | Username normalizado: {username_lower}")
+            
+            conn = api.connection
+            
+            # ── LIMPIEZA PREVIA: SOLO sesiones activas por username ───────────────
+            logger.info("[LIMPIEZA] Eliminando sesiones activas previas (solo por username)...")
+
+            try:
+                active = list(conn(cmd='/ip/hotspot/active/print'))
+                logger.info(f"[LIMPIEZA] Sesiones activas encontradas: {len(active)}")
+
+                removed_sessions = 0
+                for session in active:
+                    s_user = str(session.get('user', '')).strip().lower()
+                    
+                    if s_user == username_lower:
+                        sid = session.get('.id')
+                        s_ip = session.get('address', 'sin-ip')
+                        s_mac_report = session.get('mac-address', 'sin-mac')
+                        
+                        try:
+                            list(conn(cmd='/ip/hotspot/active/remove', numbers=sid))
+                            removed_sessions += 1
+                            logger.info(
+                                f"[LIMPIEZA] Sesión eliminada → "
+                                f"ID: {sid} | User: '{session.get('user')}' | "
+                                f"IP: {s_ip} | MAC reportada: {s_mac_report}"
+                            )
+                        except Exception as remove_err:
+                            logger.warning(f"[LIMPIEZA] Falló eliminar sesión {sid}: {remove_err}")
+
+                if removed_sessions > 0:
+                    logger.info(f"[LIMPIEZA] Éxito: {removed_sessions} sesión(es) eliminada(s)")
+                else:
+                    logger.info("[LIMPIEZA] No había sesiones activas para este usuario")
+            except Exception as e:
+                logger.error(f"[LIMPIEZA] Error al procesar sesiones activas: {e}")
+
+            time.sleep(1.0)  # reducido, solo lo necesario para que la eliminación se refleje
+            
+            # ── OBTENER IP si no viene dada ────────────────────────────────────────
+            client_ip = ip_address
+            if not client_ip:
+                logger.info("[2] Detectando IP del cliente...")
+                try:
+                    hosts = list(conn(cmd='/ip/hotspot/host/print'))
+                    for host in hosts:
+                        if host.get('mac-address', '').lower() == mac:
+                            client_ip = host.get('address', '')
+                            if client_ip:
+                                logger.info(f"[OK] IP detectada: {client_ip}")
+                                break
+                except Exception as e:
+                    logger.error(f"Error obteniendo IP: {e}")
+
+            if not client_ip:
+                return {
+                    "success": False,
+                    "conectado": False,
+                    "error": "No se pudo detectar IP del cliente",
+                    "mensaje": "El dispositivo debe estar conectado al hotspot primero"
+                }
+
+            # ── LOGIN DIRECTO (múltiples intentos con parámetros diferentes) ───────
+            logger.info("[LOGIN DIRECTO] Intentando autenticación...")
+
+            success = False
+            metodo_usado = "ninguno"
+            error_msg = None
+
+            try:
+                # Intento 1: Básico con IP + user + pass (el más común que funciona)
+                logger.info("Intento 1: login con IP + user + pass")
+                list(conn(
+                    cmd="/ip/hotspot/active/login",
+                    **{"ip": client_ip, "user": username, "password": password}
+                ))
+                success = True
+                metodo_usado = "ip_user_pass"
+            except Exception as e1:
+                error_msg = str(e1)
+                logger.warning(f"Intento 1 falló: {e1}")
+
+            if not success:
+                try:
+                    # Intento 2: Agregar mac-address explícitamente
+                    logger.info("Intento 2: login con IP + MAC + user + pass")
+                    list(conn(
+                        cmd="/ip/hotspot/active/login",
+                        **{"ip": client_ip, "mac-address": mac, "user": username, "password": password}
+                    ))
+                    success = True
+                    metodo_usado = "ip_mac_user_pass"
+                except Exception as e2:
+                    logger.warning(f"Intento 2 falló: {e2}")
+
+            if not success:
+                try:
+                    # Intento 3: Solo user + pass (a veces funciona si ya está autorizado por IP)
+                    logger.info("Intento 3: login solo con user + pass")
+                    list(conn(
+                        cmd="/ip/hotspot/active/login",
+                        **{"user": username, "password": password}
+                    ))
+                    success = True
+                    metodo_usado = "user_pass"
+                except Exception as e3:
+                    logger.warning(f"Intento 3 falló: {e3}")
+
+            # ── VERIFICACIÓN RÁPIDA (con polling corto) ─────────────────────────────
+            if success:
+                logger.info("[VERIFICACIÓN] Esperando y verificando sesión activa...")
+                
+                max_wait = 6.0
+                interval = 0.8
+                elapsed = 0.0
+                
+                while elapsed < max_wait:
+                    active = list(conn(cmd='/ip/hotspot/active/print'))
+                    for session in active:
+                        if session.get('address') == client_ip or \
+                           str(session.get('user', '')).strip().lower() == username_lower:
+                            return {
+                                "success": True,
+                                "conectado": True,
+                                "ip": session.get('address'),
+                                "mac": mac,
+                                "username": username,
+                                "session_info": {
+                                    "user": session.get('user'),
+                                    "address": session.get('address'),
+                                    "uptime": session.get('uptime', '0s'),
+                                    "bytes-in": session.get('bytes-in', '0'),
+                                    "bytes-out": session.get('bytes-out', '0')
+                                },
+                                "metodo_usado": metodo_usado,
+                                "mensaje": f"Conexión exitosa (método: {metodo_usado})"
+                            }
+                    
+                    time.sleep(interval)
+                    elapsed += interval
+
+            # Si llegó aquí → fallo
+            return {
+                "success": False,
+                "conectado": False,
+                "error": error_msg or "No se pudo autenticar con ninguno de los métodos",
+                "mensaje": "Login directo falló después de varios intentos. Revisa logs del router."
+            }
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, worker)
 # ============================================================================
 # 2. VERSIÓN PARA v7.x (más paciente y optimizada)
 # ============================================================================
