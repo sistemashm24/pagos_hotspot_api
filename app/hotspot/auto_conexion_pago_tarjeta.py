@@ -188,46 +188,30 @@ async def ejecutar_auto_conexion_v6(
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, worker)
+
+
+
 # ============================================================================
 # 2. VERSIÓN PARA v7.x (más paciente y optimizada)
 # ============================================================================
 
+
 def clean_script_content(content: str) -> str:
-    """Limpia el contenido del script para asegurar compatibilidad"""
+    """Limpia el contenido del script (solo ASCII seguro)"""
     try:
-        # Primero eliminar todos los emojis y caracteres no ASCII
-        cleaned_content = re.sub(r'[^\x00-\x7F]', ' ', content)
-        
-        # Reemplazar caracteres problemáticos comunes
-        replacements = {
-            'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u',
-            'Á': 'A', 'É': 'E', 'Í': 'I', 'Ó': 'O', 'Ú': 'U',
-            'ñ': 'n', 'Ñ': 'N',
-            '¿': '', '¡': '',
-            '`': "'", '´': "'", '“': '"', '”': '"', '‘': "'", '’': "'"
-        }
-        
-        for old_char, new_char in replacements.items():
-            cleaned_content = cleaned_content.replace(old_char, new_char)
-        
-        # Normalizar saltos de línea a formato Unix
-        cleaned_content = cleaned_content.replace('\r\n', '\n').replace('\r', '\n')
-        
-        # Eliminar múltiples espacios consecutivos
-        cleaned_content = re.sub(r' +', ' ', cleaned_content)
-        
-        # Eliminar múltiples saltos de línea consecutivos
-        cleaned_content = re.sub(r'\n\s*\n', '\n\n', cleaned_content)
-        
-        logger.info(f"Script limpiado: {len(content)} -> {len(cleaned_content)} caracteres")
-        
-        return cleaned_content
-        
-    except Exception as e:
-        logger.error(f"Error limpiando script: {e}")
+        cleaned = re.sub(r'[^\x00-\x7F]', ' ', content)
+        cleaned = cleaned.replace('\r\n', '\n').replace('\r', '\n')
+        cleaned = re.sub(r' +', ' ', cleaned)
+        cleaned = re.sub(r'\n\s*\n', '\n\n', cleaned)
+        return cleaned
+    except Exception:
         return content
 
+
 logger = logging.getLogger("hotspot_v7")
+
+
+# ============================================================================
 async def ejecutar_auto_conexion_v7(
     router_host: str,
     router_port: int,
@@ -238,10 +222,15 @@ async def ejecutar_auto_conexion_v7(
     mac_address: str,
     ip_address: str | None = None
 ) -> Dict[str, Any]:
-    
+    """
+    Versión v7 - Login por SCRIPT + limpieza SOLO por username
+    Estructura de respuesta 100% compatible con v6
+    """
+
     logger.info(f"[START] auto-login v7 | user={username} | mac={mac_address}")
 
-    from app.core.mikrotik_api import MikrotikAPI
+    from core.mikrotik_api import MikrotikAPI
+
     def worker():
         with MikrotikAPI(
             router_host,
@@ -251,217 +240,208 @@ async def ejecutar_auto_conexion_v7(
             timeout=20
         ) as api:
 
-            # Normalizar MAC
-            mac = mac_address.lower().replace("-", ":")
-            logger.info(f"[1] MAC: {mac}")
-            
-            # Obtener la conexión directa
             conn = api.connection
-            
-            # Primero obtener la IP del host si no se proporciona
-            client_ip = ip_address
+            mac = mac_address.lower().replace("-", ":")
+            username_lower = username.strip().lower()
+
+            logger.info(f"[1] MAC: {mac} | Username: {username_lower}")
+
+            # ─────────────────────────────────────────────
+            # LIMPIEZA PREVIA: SOLO SESIONES ACTIVAS POR USERNAME
+            # ─────────────────────────────────────────────
+            logger.info("[CLEAN] Eliminando sesiones activas previas por username...")
+
+            try:
+                active = list(conn(cmd='/ip/hotspot/active/print'))
+                removed = 0
+
+                for session in active:
+                    s_user = str(session.get('user', '')).strip().lower()
+                    if s_user == username_lower:
+                        sid = session.get('.id')
+                        try:
+                            list(conn(cmd='/ip/hotspot/active/remove', numbers=sid))
+                            removed += 1
+                            logger.info(
+                                f"[CLEAN] Sesión eliminada | "
+                                f"ID={sid} | IP={session.get('address')} | MAC={session.get('mac-address')}"
+                            )
+                        except Exception as e:
+                            logger.warning(f"[CLEAN] Error eliminando sesión {sid}: {e}")
+
+                if removed:
+                    logger.info(f"[CLEAN] Total sesiones eliminadas: {removed}")
+                else:
+                    logger.info("[CLEAN] No había sesiones activas para este usuario")
+
+            except Exception as e:
+                logger.error(f"[CLEAN] Error procesando sesiones activas: {e}")
+
+            time.sleep(1.0)
+
+            # ─────────────────────────────────────────────
+            # OBTENER IP SI NO SE PROPORCIONA
+            # ─────────────────────────────────────────────
+            import ipaddress
+
+            def is_valid_ipv4(value: str) -> bool:
+                try:
+                    ip = ipaddress.ip_address(value)
+                    return ip.version == 4 and str(ip) != "0.0.0.0"
+                except Exception:
+                    return False
+                
+            client_ip = ip_address if is_valid_ipv4(ip_address) else None
+
             if not client_ip:
-                logger.info(f"[1.5] Obteniendo IP para MAC: {mac}")
+                logger.info("[2] Detectando IP del cliente...")
                 try:
                     hosts = list(conn(cmd='/ip/hotspot/host/print'))
                     for host in hosts:
                         if host.get('mac-address', '').lower() == mac:
                             client_ip = host.get('to-address') or host.get('address')
                             if client_ip:
-                                logger.info(f"[1.5][OK] IP obtenida: {client_ip}")
+                                logger.info(f"[OK] IP detectada: {client_ip}")
                                 break
                 except Exception as e:
-                    logger.error(f"[1.5][ERROR] Error obteniendo IP: {e}")
-            
+                    logger.error(f"[ERROR] Detectando IP: {e}")
+
             if not client_ip:
-                logger.error(f"[1.5][FAIL] No se pudo obtener IP para MAC: {mac}")
                 return {
                     "success": False,
                     "conectado": False,
-                    "error": f"No se pudo obtener IP para MAC {mac}",
-                    "mac": mac,
-                    "username": username,
-                    "mensaje": "El dispositivo no está conectado al hotspot"
+                    "error": "No se pudo detectar IP del cliente",
+                    "mensaje": "El dispositivo debe estar conectado al hotspot primero"
                 }
-            
-            # Script ultra simple - solo ASCII
+
+            # ─────────────────────────────────────────────
+            # CREAR SCRIPT DE LOGIN (UNA SOLA VEZ)
+            # ─────────────────────────────────────────────
             timestamp = int(time.time())
             script_name = f"__login_{hashlib.md5(f'{mac}_{timestamp}'.encode()).hexdigest()[:8]}"
-            
-            # Script mínimo en ASCII puro - CON IP FIJA
+
             script_source = f""":local user "{username}"
 :local pass "{password}"
 :local mac "{mac}"
 :local ip "{client_ip}"
 
-:log info ("Ejecutando login para: " . $mac . " en IP: " . $ip)
 /ip/hotspot/active/login user=$user password=$pass ip=$ip mac-address=$mac
-:log info "Login ejecutado"
-:delay 2
-
-:local sesion [/ip/hotspot/active/find where mac-address=$mac]
-:if ([:len $sesion] > 0) do={{
-    :local info [/ip/hotspot/active/get $sesion]
-    :log info ("Sesion activa: " . ($info->"user") . " en " . ($info->"address"))
-}} else={{
-    :log warning "No se encontro sesion activa"
-}}
 """
-            
-            # Limpiar el script
-            script_source_clean = clean_script_content(script_source)
-            
-            logger.info(f"[2] Creando script: {script_name}")
-            
+
+            script_source = clean_script_content(script_source)
+            script_id = None
+
             try:
-                # 1. Eliminar script si ya existe
-                try:
-                    scripts = list(conn(cmd='/system/script/print'))
-                    for script in scripts:
-                        if script.get('name') == script_name:
-                            logger.info(f"[2][CLEAN] Eliminando script existente: {script_name}")
-                            list(conn(cmd='/system/script/remove', numbers=script.get('.id')))
-                            break
-                except Exception as e:
-                    logger.info(f"[2][INFO] No se pudo limpiar script existente: {e}")
-                
-                # 2. Crear script
-                logger.info(f"[2][ADD] Agregando script...")
+                # Crear script
                 list(conn(
                     cmd='/system/script/add',
                     name=script_name,
-                    source=script_source_clean
+                    source=script_source
                 ))
-                logger.info(f"[2][OK] Script creado")
-                
-                # 3. Ejecutar script
-                logger.info(f"[3] Ejecutando script...")
-                
-                # Primero obtener el ID del script
+
                 scripts = list(conn(cmd='/system/script/print'))
-                script_id = None
-                for script in scripts:
-                    if script.get('name') == script_name:
-                        script_id = script.get('.id')
-                        break
-                
+                script_id = next(
+                    (s.get('.id') for s in scripts if s.get('name') == script_name),
+                    None
+                )
+
                 if not script_id:
-                    raise Exception(f"No se encontró ID para script {script_name}")
-                
-                # Ejecutar usando .id
-                logger.info(f"[3][RUN] Ejecutando con ID: {script_id}")
+                    raise Exception("No se pudo obtener ID del script")
+
+                # Ejecutar script
                 list(conn(cmd='/system/script/run', **{'.id': script_id}))
-                logger.info(f"[3][OK] Script ejecutado")
-                
-                # 4. Esperar a que el script termine
-                time.sleep(3)
-                
-                # 5. Verificar sesión
-                logger.info("[4] Verificando sesión...")
-                
-                # Obtener todas las sesiones activas
-                active_sessions = list(conn(cmd='/ip/hotspot/active/print'))
-                matching_sessions = []
-                
-                for session in active_sessions:
-                    session_mac = session.get('mac-address', '').lower()
-                    if session_mac == mac:
-                        matching_sessions.append(session)
-                
-                if matching_sessions:
-                    sesion = matching_sessions[0]
-                    logger.info(f"[4][OK] Sesión encontrada")
-                    logger.info(f"    Usuario: {sesion.get('user')}")
-                    logger.info(f"    IP: {sesion.get('address')}")
-                    logger.info(f"    Uptime: {sesion.get('uptime')}")
-                    
-                    # 6. Limpiar script
-                    try:
-                        list(conn(cmd='/system/script/remove', numbers=script_id))
-                        logger.info("[5] Script limpiado")
-                    except Exception as e:
-                        logger.info(f"[5][INFO] No se pudo limpiar script: {e}")
-                    
+                logger.info("[3] Script ejecutado")
+
+                # ─────────────────────────────────────────
+                # VERIFICACIÓN (SOLO POR USERNAME)
+                # ─────────────────────────────────────────
+                logger.info("[4] Verificando sesión activa...")
+
+                max_wait = 6.0
+                interval = 1.0
+                elapsed = 0.0
+                session_found = None
+
+                while elapsed < max_wait:
+                    active = list(conn(cmd='/ip/hotspot/active/print'))
+                    for session in active:
+                        if str(session.get('user', '')).strip().lower() == username_lower:
+                            session_found = session
+                            break
+
+                    if session_found:
+                        break
+
+                    time.sleep(interval)
+                    elapsed += interval
+
+                # Limpieza del script (SIEMPRE)
+                try:
+                    list(conn(cmd='/system/script/remove', numbers=script_id))
+                except Exception as e:
+                    logger.warning(f"[CLEAN] No se pudo eliminar script: {e}")
+
+                # ─────────────────────────────────────────
+                # RESULTADO FINAL (CONTRATO v6)
+                # ─────────────────────────────────────────
+                if session_found:
                     return {
                         "success": True,
                         "conectado": True,
-                        "ip": sesion.get('address'),
+                        "ip": session_found.get('address'),
                         "mac": mac,
                         "username": username,
                         "session_info": {
-                            "user": sesion.get('user'),
-                            "address": sesion.get('address'),
-                            "uptime": sesion.get('uptime'),
-                            "mac-address": sesion.get('mac-address'),
-                            "bytes-in": sesion.get('bytes-in'),
-                            "bytes-out": sesion.get('bytes-out')
+                            "user": session_found.get('user'),
+                            "address": session_found.get('address'),
+                            "uptime": session_found.get('uptime', '0s'),
+                            "bytes-in": session_found.get('bytes-in', '0'),
+                            "bytes-out": session_found.get('bytes-out', '0')
                         },
-                        "mensaje": "Login exitoso"
+                        "metodo_usado": "script_login",
+                        "mensaje": "Conexión exitosa (método: script_login)"
                     }
-                else:
-                    logger.warning("[4][WARN] No se encontró sesión activa")
-                    
-                    # Verificar si el usuario existe de todas formas
-                    for session in active_sessions:
-                        if session.get('user') == username:
-                            logger.info(f"[4][INFO] Usuario {username} encontrado con diferente MAC")
-                            return {
-                                "success": True,
-                                "conectado": True,
-                                "ip": session.get('address'),
-                                "mac": session.get('mac-address'),
-                                "username": username,
-                                "session_info": {
-                                    "user": session.get('user'),
-                                    "address": session.get('address'),
-                                    "uptime": session.get('uptime')
-                                },
-                                "mensaje": "Usuario ya autenticado (diferente MAC)"
-                            }
-                    
-                    # Limpiar script
+
+                return {
+                    "success": False,
+                    "conectado": False,
+                    "error": "Login ejecutado pero la sesión no apareció a tiempo",
+                    "mensaje": "El script se ejecutó correctamente pero RouterOS no confirmó la sesión"
+                }
+
+            except Exception as e:
+                msg = str(e).lower()
+
+                # Limpieza del script SIEMPRE
+                if script_id:
                     try:
                         list(conn(cmd='/system/script/remove', numbers=script_id))
-                    except:
-                        pass
-                    
+                    except Exception as cleanup_err:
+                        logger.warning(f"[CLEAN] No se pudo eliminar script tras error: {cleanup_err}")
+
+                # Caso: IP/usuario ya logueado
+                if "already logged in" in msg:
+                    logger.warning(f"[WARN] Usuario/IP ya tenía sesión activa: {e}")
                     return {
-                        "success": False,
-                        "conectado": False,
-                        "error": "Script ejecutado pero no se encontró sesión",
-                        "ip": client_ip,
-                        "mac": mac,
-                        "username": username,
-                        "mensaje": "Verificar manualmente en router"
+                        "success": True,
+                        "conectado": True,
+                        "error": None,
+                        "mensaje": "El usuario ya estaba conectado previamente"
                     }
-                    
-            except Exception as e:
+
+                # Otros errores reales
                 logger.error(f"[ERROR] {e}")
-                import traceback
-                traceback.print_exc()
-                
-                # Intentar limpiar script en caso de error
-                try:
-                    scripts = list(conn(cmd='/system/script/print'))
-                    for script in scripts:
-                        if script.get('name') == script_name:
-                            list(conn(cmd='/system/script/remove', numbers=script.get('.id')))
-                            break
-                except:
-                    pass
-                
                 return {
                     "success": False,
                     "conectado": False,
                     "error": str(e),
-                    "ip": client_ip,
-                    "mac": mac,
-                    "username": username
+                    "mensaje": "Error durante el proceso de auto-login en RouterOS v7"
                 }
+
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, worker)
-
+    
 
 # ============================================================================
 # 3. FUNCIÓN PÚBLICA (la que todos llaman) - detecta versión automáticamente
