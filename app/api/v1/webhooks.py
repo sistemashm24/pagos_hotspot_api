@@ -13,6 +13,8 @@ from app.core.database import get_db
 from app.models.transaccion import Transaccion
 from app.models.empresa import Empresa
 
+from app.services.mercado_pago_service import mercado_pago_service
+
 router = APIRouter(tags=["Webhooks"])
 logger = logging.getLogger(__name__)
 
@@ -169,64 +171,94 @@ async def process_mercado_pago_notification(
     notification_id: str,
     db: AsyncSession
 ) -> Dict[str, Any]:
-    """Procesar notificación de Mercado Pago en background"""
+    logger.info(f"Procesando notificación MP: {notification_id}")
+    
+    # 1. Extraer el payment_id correctamente (el formato más común en 2025+)
+    payment_id = None
+    
+    # Caso moderno: "data": {"id": "..."}
+    if isinstance(payment_data.get("data"), dict):
+        payment_id = str(payment_data["data"].get("id"))
+    
+    # Fallback viejo o query params
+    if not payment_id:
+        payment_id = str(payment_data.get("id", ""))
+    
+    if not payment_id:
+        logger.error("Webhook sin payment_id válido")
+        return {"success": False, "error": "No payment_id found"}
+    
+    logger.info(f"Payment ID extraído: {payment_id}")
+    
+    # 2. Buscar transacción (ya lo tienes bien implementado)
+    transaction = await find_transaction_by_payment_id(db, payment_id)
+    if not transaction and "external_reference" in payment_data:
+        transaction = await find_transaction_by_external_ref(db, payment_data["external_reference"])
+    
+    if not transaction:
+        logger.warning(f"No se encontró transacción para payment_id={payment_id}")
+        return {"success": False, "error": "Transaction not found"}
+    
+    # 3. Obtener empresa → access_token
+    result = await db.execute(select(Empresa).where(Empresa.id == transaction.empresa_id))
+    empresa = result.scalar_one_or_none()
+    
+    if not empresa or not empresa.mercado_pago_access_token:
+        logger.error(f"Empresa {transaction.empresa_id} sin access_token")
+        return {"success": False, "error": "Missing credentials"}
+    
+    # 4. CONSULTAR ESTADO REAL ← ESTO ES LO QUE FALTA
     try:
-        logger.info(f"🔧 Procesando webhook en background: notification_id={notification_id}")
+        payment_status = await mercado_pago_service.get_payment_status(
+            access_token=empresa.mercado_pago_access_token,
+            payment_id=int(payment_id)  # Asegúr que sea int si el SDK lo requiere
+        )
         
-        payment_id = str(payment_data.get("id"))
-        external_reference = payment_data.get("external_reference")
-        status = payment_data.get("status", "unknown")
+        real_status = payment_status.get("status", "unknown")
+        status_detail = payment_status.get("status_detail", "")
         
-        logger.info(f"   Datos: payment_id={payment_id}, external_ref={external_reference}, status={status}")
+        logger.info(f"Estado consultado → {real_status} ({status_detail})")
         
-        # Buscar transacción por external_reference (PRIMERA OPCIÓN)
-        transaction = None
-        if external_reference:
-            transaction = await find_transaction_by_external_ref(db, external_reference)
+        # 5. Actualizar transacción
+        old_status = transaction.estado_pago
+        transaction.estado_pago = real_status
         
-        # Si no se encuentra por external_reference, buscar por payment_id
-        if not transaction and payment_id:
-            transaction = await find_transaction_by_payment_id(db, payment_id)
+        if real_status == "approved" and not transaction.pagada_en:
+            transaction.pagada_en = datetime.utcnow()
         
-        if not transaction:
-            logger.warning(f"⚠️ Transacción no encontrada para: external_ref={external_reference}, payment_id={payment_id}")
-            return {
-                "success": False,
-                "error": "Transaction not found",
-                "external_reference": external_reference,
-                "payment_id": payment_id
+        # Mejorar metadata_json con info del webhook + consulta
+        if not isinstance(transaction.metadata_json, dict):
+            transaction.metadata_json = {}
+        
+        transaction.metadata_json.update({
+            "last_webhook": {
+                "notification_id": notification_id,
+                "received_at": datetime.utcnow().isoformat(),
+                "action": payment_data.get("action"),
+                "queried_status": real_status,
+                "status_detail": status_detail
             }
+        })
         
-        # Verificar si ya procesamos este webhook
-        if transaction.notification_id == notification_id:
-            logger.info(f"📝 Webhook ya procesado para transacción {transaction.transaccion_id}")
-            return {
-                "success": True,
-                "message": "Already processed",
-                "transaction_id": transaction.transaccion_id,
-                "status": "duplicate"
-            }
+        transaction.webhook_processed = True
+        transaction.webhook_received_at = datetime.utcnow()
+        transaction.notification_id = notification_id
         
-        # Actualizar transacción
-        result = await update_transaction_from_webhook(db, transaction, payment_data, notification_id)
+        await db.commit()
         
-        # Log según estado
-        if status == "approved":
-            logger.info(f"✅ PAGO APROBADO: {payment_id} - Usuario: {transaction.usuario_hotspot}")
-        elif status == "rejected":
-            logger.info(f"❌ PAGO RECHAZADO: {payment_id} - Razón: {payment_data.get('status_detail')}")
-        elif status == "cancelled":
-            logger.info(f"🔄 PAGO CANCELADO: {payment_id}")
-        elif status == "pending":
-            logger.info(f"⏳ PAGO PENDIENTE: {payment_id}")
-        else:
-            logger.info(f"📄 PAGO ACTUALIZADO: {payment_id} -> {status}")
+        logger.info(f"Transacción {transaction.transaccion_id} actualizada: {old_status} → {real_status}")
         
-        return result
-        
+        return {
+            "success": True,
+            "new_status": real_status,
+            "detail": status_detail
+        }
+    
     except Exception as e:
-        logger.error(f"💥 Error en process_mercado_pago_notification: {str(e)}", exc_info=True)
+        logger.error(f"Error al consultar/actualizar: {str(e)}", exc_info=True)
+        await db.rollback()
         return {"success": False, "error": str(e)}
+    
 
 
 @router.post("/mercado-pago")

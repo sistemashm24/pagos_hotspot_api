@@ -15,6 +15,7 @@ sys.path.insert(0, str(project_root))
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
+from datetime import datetime, timezone
 
 
 print("\n=== CARGANDO MÓDULOS ===")
@@ -98,8 +99,19 @@ modulos_config = {
 
 app = FastAPI(
     title=settings.APP_NAME,
-    description="Sistema de pagos multi-empresa para Hotspot MikroTik",
-    version="1.0.0",
+    description=(
+        "API **multi-empresa** para procesar pagos con Mercado Pago o Conekta, "
+        "crear y gestionar usuarios en Hotspot MikroTik, recibir notificaciones vía webhooks, "
+        "y permitir **autoconexión automática** en dispositivos con MAC aleatorio (random MAC).\n\n"
+        "**Características principales:**\n"
+        "- Pagos con Mercado Pago y Conekta (tarjeta de credito y debito)\n"
+        "- Integración con MikroTik Hotspot\n"
+        "- Webhooks por empresa para actualizaciones en tiempo real\n"
+        "- Autenticación mediante API Keys\n"
+        "- Gestión independiente y segura por empresa\n"
+        "- **Autoconexión sin necesidad de login manual**, compatible con MAC random"
+    ),
+    version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -134,14 +146,17 @@ for module_path, config in modulos_config.items():
 
 print("\n=== SERVIDOR LISTO ===")
 
-@app.get("/")
+
+@app.get("/", summary="Estado de la API", tags=["Health"])
 async def root():
     return {
-        "message": "MikroTik Payment API - Windows",
-        "version": "1.0.0",
-        "status": "running",
+        "message": "Sistema de pagos y gestión de accesos WiFi para hotspots MikroTik",
+        "version": "2.0.0",
+        "status": "running",        
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds") + "Z",
         "docs": "/docs"
     }
+
 
 @app.get("/health")
 async def health_check():
