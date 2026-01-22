@@ -225,11 +225,24 @@ async def process_mercado_pago_notification(
     
     # 6. CONSULTAR ESTADO REAL
     try:
-        payment_status = await mercado_pago_service.get_payment_status(
+        """ payment_status = await mercado_pago_service.get_payment_status(
             access_token=empresa.mercado_pago_access_token,
             payment_id=int(payment_id)  # Asegúr que sea int si el SDK lo requiere
-        )
+        ) """
         
+        # Desencriptar el access_token (igual que en la creación de pago)
+        token_manager = SecureTokenManager()
+        access_token = token_manager.decrypt_if_needed(empresa.mercado_pago_access_token)
+
+        # Debug para confirmar que ahora es el token real
+        logger.info(f"🔑 Access Token usado en webhook (primeros 10 chars): {access_token[:10]}...")
+
+        payment_status = await mercado_pago_service.get_payment_status(
+            access_token=access_token,           # ← AHORA sí desencriptado
+            payment_id=int(payment_id)
+        )
+
+
         real_status = payment_status.get("status", "unknown")
         status_detail = payment_status.get("status_detail", "")
         
