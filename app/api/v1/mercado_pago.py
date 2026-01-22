@@ -452,8 +452,19 @@ async def consultar_estado_pago(
     
     try:
         # Consultar estado en Mercado Pago
-        payment_status = await mercado_pago_service.get_payment_status(
+        """ payment_status = await mercado_pago_service.get_payment_status(
             access_token=empresa.mercado_pago_access_token,
+            payment_id=payment_id
+        ) """
+        
+        # ¡Aquí está el fix!
+        token_manager = SecureTokenManager()
+        access_token = token_manager.decrypt_if_needed(empresa.mercado_pago_access_token)
+        
+        print(f"🔑 Access Token usado en consulta (primeros 10 chars): {access_token[:10]}...")  # para debug
+        
+        payment_status = await mercado_pago_service.get_payment_status(
+            access_token=access_token,  # ← ahora desencriptado
             payment_id=payment_id
         )
         
