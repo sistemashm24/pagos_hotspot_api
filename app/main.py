@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 
 print("\n=== CARGANDO MÓDULOS ===")
 
-# Diccionario de módulos a cargar (ACTUALIZADO CON MERCADO PAGO)
+# Diccionario de módulos a cargar
 modulos_config = {
     # Públicos V1
     "app.api.v1.auth": {

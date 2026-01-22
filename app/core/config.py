@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     CONEKTA_DEFAULT_PRIVATE_KEY: str = Field("", env="CONEKTA_DEFAULT_PRIVATE_KEY")
     CONEKTA_DEFAULT_PUBLIC_KEY: str = Field("", env="CONEKTA_DEFAULT_PUBLIC_KEY")
     
+    # Clave para encriptar access_token y webhook_secret de Mercado Pago
+    ENCRYPTION_KEY_MERCADO_PAGO: str = Field("", env="ENCRYPTION_KEY_MERCADO_PAGO")
+    
     # App
     APP_NAME: str = Field("MikroTik Payment API", env="APP_NAME")
     DEBUG: bool = Field(False, env="DEBUG")

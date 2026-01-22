@@ -1,18 +1,24 @@
 # app/api/v1/mercado_pago.py
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Literal, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from datetime import datetime
 import asyncio
 
 from app.core.database import get_db
-from app.core.auth import require_api_key
+from app.core.auth import require_api_key, require_cliente_admin
+from app.core.secure_token import SecureTokenManager
+from app.models.empresa import Empresa
+from app.models.usuario import Usuario
 from app.services.mercado_pago_service import mercado_pago_service
 from app.services.mikrotik_service import mikrotik_service
 from app.schemas.request.mercado_pago import MercadoPagoPaymentRequest
 from app.models.producto import Producto
 from app.models.transaccion import Transaccion
+from fastapi import logger
+
 
 import json
 
@@ -194,9 +200,21 @@ async def pagar_hotspot_mercado_pago(
         
         # Log del payload recibido del frontend para depuración (Cambio nuevo)
         print(f"📥 Payload recibido del frontend: {json.dumps(payment_data.dict(), indent=2)}")
-        
+
+        #antes de encritpar
+        """ payment_result = await mercado_pago_service.create_payment( 
+            access_token=empresa.mercado_pago_access_token, 
+            mode=empresa.mercado_pago_mode or 'test', 
+            payment_data={ """
+
+        # 🔐 Desencriptar siempre el token (si no está encriptado, lo usa directo)
+        token_manager = SecureTokenManager()
+        access_token = token_manager.decrypt_if_needed(
+            empresa.mercado_pago_access_token
+        )
+
         payment_result = await mercado_pago_service.create_payment(
-            access_token=empresa.mercado_pago_access_token,
+            access_token=access_token,  # 👈 YA DESENCRIPTADO
             mode=empresa.mercado_pago_mode or 'test',
             payment_data={
                 "token": payment_data.token,
@@ -205,10 +223,11 @@ async def pagar_hotspot_mercado_pago(
                 "transaction_amount": payment_data.transaction_amount,
                 "installments": payment_data.installments,
                 "customer_email": payment_data.customer_email,
-                "customer_name": payment_data.customer_name,  # AGREGADO para mejor aprobación
-                "customer_phone": payment_data.customer_phone,  # AGREGADO para mejor aprobación
+                "customer_name": payment_data.customer_name,
+                "customer_phone": payment_data.customer_phone,
                 "payer": payment_data.payer or {"email": payment_data.customer_email}
             },
+
             metadata={
                 "empresa_id": empresa.id,
                 "router_id": router.id,
@@ -456,3 +475,107 @@ async def consultar_estado_pago(
             status_code=500,
             detail=f"Error al consultar estado del pago: {str(e)}"
         )
+    
+
+
+class MercadoPagoCredentials(BaseModel):
+    access_token: Optional[str] = Field(
+        None,
+        json_schema_extra={"description": "Access token de Mercado Pago (test o producción)"}
+    )
+    webhook_secret: Optional[str] = Field(
+        None,
+        json_schema_extra={"description": "Clave secreta para validar webhooks"}
+    )
+    public_key: Optional[str] = Field(
+        None,
+        json_schema_extra={"description": "Public key de Mercado Pago (para frontend)"}
+    )
+    mode: Optional[Literal["test", "live"]] = Field(
+        "test",
+        json_schema_extra={"description": "Modo de operación"}
+    )
+
+
+@router.post("/configurar-credenciales",
+    summary="Configurar o actualizar credenciales de Mercado Pago",
+    description="Crea o actualiza las credenciales de Mercado Pago para la empresa del usuario autenticado. "
+                "Campos no enviados se mantienen intactos. Enviar '' o null para borrar un campo sensible.",
+    tags=["Configuración Mercado Pago"]
+)
+async def configurar_credenciales_mercado_pago(
+    datos: MercadoPagoCredentials,
+    usuario: Usuario = Depends(require_cliente_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    if not usuario.empresa_id:
+        raise HTTPException(400, "Usuario sin empresa asociada")
+
+    result = await db.execute(select(Empresa).where(Empresa.id == usuario.empresa_id))
+    empresa = result.scalar_one_or_none()
+
+    if not empresa:
+        raise HTTPException(404, "Empresa no encontrada")
+
+    if not empresa.activa:
+        raise HTTPException(400, "Empresa inactiva")
+
+    token_manager = SecureTokenManager()
+    updated_fields = []
+
+    # Access Token: encriptar si viene valor, borrar si viene vacío
+    if datos.access_token is not None:
+        if datos.access_token.strip():
+            empresa.mercado_pago_access_token = token_manager.encrypt(datos.access_token.strip())
+            updated_fields.append("access_token (actualizado)")
+        else:
+            empresa.mercado_pago_access_token = None
+            updated_fields.append("access_token (eliminado)")
+
+    # Webhook Secret: igual lógica
+    if datos.webhook_secret is not None:
+        if datos.webhook_secret.strip():
+            empresa.mercado_pago_webhook_secret = token_manager.encrypt(datos.webhook_secret.strip())
+            updated_fields.append("webhook_secret (actualizado)")
+        else:
+            empresa.mercado_pago_webhook_secret = None
+            updated_fields.append("webhook_secret (eliminado)")
+
+    # Public Key y Mode: no sensibles, se actualizan directamente
+    if datos.public_key is not None:
+        empresa.mercado_pago_public_key = datos.public_key.strip() or None
+        updated_fields.append("public_key")
+
+    if datos.mode is not None:
+        empresa.mercado_pago_mode = datos.mode
+        updated_fields.append("mode")
+
+    # Si no hay cambios → informar
+    if not updated_fields:
+        return {
+            "success": True,
+            "message": "No se enviaron cambios. Credenciales actuales se mantienen.",
+            "empresa": {"id": empresa.id, "nombre": empresa.nombre},
+            "configurado": {
+                "access_token": bool(empresa.mercado_pago_access_token),
+                "webhook_secret": bool(empresa.mercado_pago_webhook_secret),
+                "public_key": bool(empresa.mercado_pago_public_key),
+                "mode": empresa.mercado_pago_mode
+            }
+        }
+
+    await db.commit()
+
+
+    return {
+        "success": True,
+        "message": "Credenciales actualizadas correctamente",
+        "empresa": {"id": empresa.id, "nombre": empresa.nombre},
+        "campos_modificados": updated_fields,
+        "configuracion_actual": {
+            "access_token": bool(empresa.mercado_pago_access_token),
+            "webhook_secret": bool(empresa.mercado_pago_webhook_secret),
+            "public_key": bool(empresa.mercado_pago_public_key),
+            "mode": empresa.mercado_pago_mode
+        }
+    }

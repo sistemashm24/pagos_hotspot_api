@@ -31,5 +31,6 @@ class MercadoPagoPaymentRequest(BaseModel):
     # Información del pagador
     payer: Optional[dict] = Field(None, alias="payer")
 
-    class Config:
-        allow_population_by_field_name = True
+    model_config = {
+        "populate_by_name": True
+    }

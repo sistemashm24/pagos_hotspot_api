@@ -14,6 +14,8 @@ from app.models.transaccion import Transaccion
 from app.models.empresa import Empresa
 
 from app.services.mercado_pago_service import mercado_pago_service
+from app.core.secure_token import SecureTokenManager
+
 
 router = APIRouter(tags=["Webhooks"])
 logger = logging.getLogger(__name__)
@@ -36,23 +38,22 @@ def verify_webhook_signature(
     try:
         logger.info(f"🔐 VERIFICACIÓN DE FIRMA (FORMATO OFICIAL MERCADO PAGO)")
         
-        # Parsear X-Signature: ts=xxx,v1=yyy
-        parts = signature_header.split(',')
-        if len(parts) != 2:
-            logger.error(f"Formato X-Signature inválido: {signature_header}")
+        # Parsear X-Signature de forma más robusta: ts=xxx,v1=yyy
+        parts = [p.strip() for p in signature_header.split(',')]
+        timestamp = None
+        received_hash = None
+        
+        for part in parts:
+            if part.startswith("ts="):
+                timestamp = part[3:]
+            elif part.startswith("v1="):
+                received_hash = part[3:]
+        
+        if not timestamp or not received_hash:
+            logger.error(f"Formato X-Signature inválido o incompleto: {signature_header}")
             return False
         
-        ts_part = parts[0].strip()
-        hash_part = parts[1].strip()
-        
-        if not ts_part.startswith("ts=") or not hash_part.startswith("v1="):
-            logger.error(f"Partes inválidas en X-Signature: {ts_part}, {hash_part}")
-            return False
-        
-        timestamp = ts_part[3:]  # remover "ts="
-        received_hash = hash_part[3:]  # remover "v1="
-        
-        # Construir el manifest correcto
+        # Construir el manifest correcto (exacto según docs MP 2025+)
         message = f"id:{data_id};request-id:{request_id_header};ts:{timestamp};"
         
         # Calcular HMAC-SHA256
@@ -62,21 +63,21 @@ def verify_webhook_signature(
             hashlib.sha256
         ).hexdigest()
         
-        # Logs para debug
+        # Logs para debug mejorados
         logger.info(f"   • Timestamp: {timestamp}")
         logger.info(f"   • Data ID: {data_id}")
         logger.info(f"   • Request-ID: {request_id_header}")
-        logger.info(f"   • Manifest: {message}")
-        logger.info(f"   • Hash esperado: {expected_hash}")
-        logger.info(f"   • Hash recibido: {received_hash}")
-        logger.info(f"   • Coinciden: {expected_hash == received_hash}")
+        logger.info(f"   • Manifest completo: '{message}'")
+        logger.info(f"   • Hash esperado (primeros 10 chars): {expected_hash[:10]}...")
+        logger.info(f"   • Hash recibido (primeros 10 chars): {received_hash[:10]}...")
+        logger.info(f"   • Coinciden: {hmac.compare_digest(expected_hash, received_hash)}")
         
         return hmac.compare_digest(expected_hash, received_hash)
         
     except Exception as e:
         logger.error(f"💥 Error verificando firma: {str(e)}", exc_info=True)
         return False
-    
+     
 
 async def find_transaction_by_external_ref(db: AsyncSession, external_reference: str) -> Optional[Transaccion]:
     """Buscar transacción por external_reference"""
@@ -190,16 +191,31 @@ async def process_mercado_pago_notification(
     
     logger.info(f"Payment ID extraído: {payment_id}")
     
-    # 2. Buscar transacción (ya lo tienes bien implementado)
-    transaction = await find_transaction_by_payment_id(db, payment_id)
-    if not transaction and "external_reference" in payment_data:
-        transaction = await find_transaction_by_external_ref(db, payment_data["external_reference"])
+    # 2. Extraer external_reference si existe
+    external_reference = payment_data.get("external_reference") or payment_data.get("data", {}).get("external_reference")
+    
+    # 3. Buscar transacción priorizando external_reference
+    transaction = None
+    if external_reference:
+        transaction = await find_transaction_by_external_ref(db, external_reference)
+    
+    if not transaction and payment_id:
+        transaction = await find_transaction_by_payment_id(db, payment_id)
     
     if not transaction:
-        logger.warning(f"No se encontró transacción para payment_id={payment_id}")
+        logger.warning(f"No se encontró transacción para payment_id={payment_id} o external_ref={external_reference}")
         return {"success": False, "error": "Transaction not found"}
     
-    # 3. Obtener empresa → access_token
+    # 4. Verificar si ya fue procesado este notification_id (idempotencia)
+    if transaction.metadata_json is None:
+        transaction.metadata_json = {}
+    
+    processed_notifications = transaction.metadata_json.get("processed_notifications", [])
+    if notification_id in processed_notifications:
+        logger.info(f"Webhook duplicado ignorado: {notification_id} (ya procesado)")
+        return {"success": True, "message": "Duplicate notification ignored"}
+    
+    # 5. Obtener empresa → access_token
     result = await db.execute(select(Empresa).where(Empresa.id == transaction.empresa_id))
     empresa = result.scalar_one_or_none()
     
@@ -207,7 +223,7 @@ async def process_mercado_pago_notification(
         logger.error(f"Empresa {transaction.empresa_id} sin access_token")
         return {"success": False, "error": "Missing credentials"}
     
-    # 4. CONSULTAR ESTADO REAL ← ESTO ES LO QUE FALTA
+    # 6. CONSULTAR ESTADO REAL
     try:
         payment_status = await mercado_pago_service.get_payment_status(
             access_token=empresa.mercado_pago_access_token,
@@ -219,7 +235,7 @@ async def process_mercado_pago_notification(
         
         logger.info(f"Estado consultado → {real_status} ({status_detail})")
         
-        # 5. Actualizar transacción
+        # 7. Actualizar transacción
         old_status = transaction.estado_pago
         transaction.estado_pago = real_status
         
@@ -244,6 +260,10 @@ async def process_mercado_pago_notification(
         transaction.webhook_received_at = datetime.utcnow()
         transaction.notification_id = notification_id
         
+        # Registrar notification_id como procesado
+        processed_notifications.append(notification_id)
+        transaction.metadata_json["processed_notifications"] = processed_notifications[-20:]  # Limitar a últimos 20
+        
         await db.commit()
         
         logger.info(f"Transacción {transaction.transaccion_id} actualizada: {old_status} → {real_status}")
@@ -260,7 +280,6 @@ async def process_mercado_pago_notification(
         return {"success": False, "error": str(e)}
     
 
-
 @router.post("/mercado-pago")
 async def mercado_pago_webhook(
     request: Request,
@@ -273,11 +292,21 @@ async def mercado_pago_webhook(
     WEBHOOK PRINCIPAL PARA MERCADO PAGO - MULTI-TENANT
     
     URL FIJA PARA TODAS LAS EMPRESAS:
-    https://4d686998b1a3.ngrok-free.app/api/v1/webhook/mercado-pago
+    https://payhotspot.wispremote.com/api/v1/webhook/mercado-pago
     """
     try:
         # ======================
-        # 1. LEER DATOS DEL WEBHOOK
+        # 1. Responder 200 rápido (obligatorio para MP, antes de cualquier procesamiento)
+        # ======================
+        # Nota: Esto evita reintentos innecesarios de MP
+        response_base = {
+            "status": "received",
+            "message": "Webhook received and queued",
+            "received_at": datetime.utcnow().isoformat()
+        }
+
+        # ======================
+        # 2. LEER DATOS DEL WEBHOOK
         # ======================
         payload_body = await request.body()
         payload_text = payload_body.decode('utf-8')
@@ -285,107 +314,46 @@ async def mercado_pago_webhook(
         logger.info(f"📦 Raw webhook recibido (primeros 500 chars): {payload_text[:500]}")
         
         # ======================
-        # 2. PARSEAR JSON
+        # 3. PARSEAR JSON
         # ======================
         try:
             webhook_data = json.loads(payload_text)
         except json.JSONDecodeError as e:
             logger.error(f"❌ JSON inválido: {str(e)}")
-            raise HTTPException(status_code=400, detail="Invalid JSON format")
+            return response_base  # Igual 200 para no reintentar
         
         # ======================
-        # 3. EXTRAER DATOS CLAVE
+        # 4. EXTRAER DATOS CLAVE
         # ======================
         webhook_type = webhook_data.get("type", "unknown")
-        notification_id_raw = webhook_data.get("id")
-        notification_id = str(notification_id_raw) if notification_id_raw is not None else "unknown"
+        notification_id = str(webhook_data.get("id", "unknown"))  # Usamos str para evitar errores
         action = webhook_data.get("action", "unknown")
-        payment_data = webhook_data.get("data", {})
         
-        # Obtener data.id (payment_id) del JSON o fallback a query params (usado en pruebas)
-        data_id = None
-        if payment_data.get("id"):
-            data_id = str(payment_data.get("id"))
-        else:
-            data_id = request.query_params.get("data.id")
+        # Extraer data_id (para firma)
+        data_id = webhook_data.get("data", {}).get("id") or webhook_data.get("id")
         
-        external_reference = payment_data.get("external_reference")
-        payment_id = data_id  # Para compatibilidad con el resto del código
+        # Extraer payment_id
+        payment_id = data_id  # Normalmente coincide
         
-        logger.info(f"📨 Webhook recibido:")
-        logger.info(f"   • Tipo: {webhook_type}")
-        logger.info(f"   • Acción: {action}")
-        logger.info(f"   • ID notificación: {notification_id}")
-        logger.info(f"   • Data ID (payment_id): {data_id}")
-        logger.info(f"   • External Reference: {external_reference}")
-        logger.info(f"   • X-Request-Id: {x_request_id}")
-        logger.info(f"   • X-Signature: {x_signature}")
-
-        # ======================
-        # 4. VALIDAR WEBHOOK TYPE
-        # ======================
-        if webhook_type not in ["payment", "plan", "subscription", "invoice", "test"]:
-            logger.warning(f"⚠️ Tipo de webhook no soportado: {webhook_type}")
-            return {
-                "status": "ignored",
-                "message": f"Webhook type '{webhook_type}' not supported",
-                "timestamp": datetime.utcnow().isoformat()
-            }
+        # External reference
+        external_reference = webhook_data.get("external_reference") or webhook_data.get("data", {}).get("external_reference")
         
         # ======================
-        # 5. BUSCAR TRANSACCIÓN
+        # 5. Buscar transacción rápido (sin firma aún)
         # ======================
         transaction = None
-        
         if external_reference:
             transaction = await find_transaction_by_external_ref(db, external_reference)
-            if transaction:
-                logger.info(f"✅ Transacción encontrada por external_reference: {transaction.id}")
         
         if not transaction and payment_id:
             transaction = await find_transaction_by_payment_id(db, payment_id)
-            if transaction:
-                logger.info(f"✅ Transacción encontrada por payment_id: {transaction.id}")
         
         if not transaction:
-            logger.error(f"❌ Transacción NO encontrada para:")
-            logger.error(f"   • External Reference: {external_reference}")
-            logger.error(f"   • Payment ID: {payment_id}")
-            
-            if webhook_type == "test":
-                logger.info("🧪 Webhook de prueba sin transacción - OK")
-                return {
-                    "status": "ok",
-                    "message": "Test webhook received (no transaction found)",
-                    "id": notification_id,
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-            
-            return {
-                "status": "error",
-                "message": "Transaction not found",
-                "external_reference": external_reference,
-                "payment_id": payment_id,
-                "received_at": datetime.utcnow().isoformat()
-            }
+            logger.warning(f"⚠️ Transacción no encontrada para notification_id={notification_id}")
+            return response_base  # 200 para no reintentar
         
         # ======================
-        # 6. VERIFICAR EMPRESA_ID
-        # ======================
-        if not transaction.empresa_id:
-            logger.error(f"❌ Transacción {transaction.id} NO tiene empresa_id")
-            return {
-                "status": "error",
-                "message": "Transaction has no empresa_id",
-                "transaction_id": transaction.id,
-                "external_reference": transaction.external_reference,
-                "received_at": datetime.utcnow().isoformat()
-            }
-        
-        logger.info(f"   • Empresa ID en transacción: {transaction.empresa_id}")
-        
-        # ======================
-        # 7. OBTENER EMPRESA
+        # 6. OBTENER EMPRESA
         # ======================
         result = await db.execute(
             select(Empresa).where(Empresa.id == transaction.empresa_id)
@@ -394,17 +362,12 @@ async def mercado_pago_webhook(
         
         if not empresa:
             logger.error(f"❌ Empresa NO encontrada: {transaction.empresa_id}")
-            return {
-                "status": "error",
-                "message": "Empresa not found",
-                "empresa_id": transaction.empresa_id,
-                "received_at": datetime.utcnow().isoformat()
-            }
+            return response_base
         
         logger.info(f"✅ Empresa identificada: {empresa.nombre} ({empresa.id})")
         
         # ======================
-        # 8. VERIFICAR FIRMA (FORMATO OFICIAL CORRECTO DE MERCADO PAGO)
+        # 7. VERIFICAR FIRMA (antes de encolar, pero rápido)
         # ======================
         signature_verified = False
         
@@ -416,52 +379,61 @@ async def mercado_pago_webhook(
             elif not data_id:
                 logger.warning(f"⚠️ No se encontró data.id para verificar la firma")
             else:
-                signature_verified = verify_webhook_signature(
+                #antes de ecnriptar
+                """ signature_verified = verify_webhook_signature(
                     signature_header=x_signature,
                     request_id_header=x_request_id,
                     data_id=data_id,
                     secret_key=empresa.mercado_pago_webhook_secret
+                ) """
+                # 🔐 Desencriptar siempre el webhook_secret
+                token_manager = SecureTokenManager()
+                webhook_secret = token_manager.decrypt_if_needed(
+                    empresa.mercado_pago_webhook_secret
                 )
+
+                signature_verified = verify_webhook_signature(
+                    signature_header=x_signature,
+                    request_id_header=x_request_id,
+                    data_id=data_id,
+                    secret_key=webhook_secret  
+                )
+
 
                 if signature_verified:
                     logger.info("✅ Firma verificada correctamente con formato oficial")
                 else:
-                    logger.warning("⚠️ Falló la verificación de firma")
-                
-                if not signature_verified:
                     logger.warning(f"⚠️ FIRMA INVÁLIDA para empresa {empresa.id}")
-                    logger.warning(f"   X-Signature: {x_signature}")
+                    logger.warning(f"   X-Signature: {x_signature[:20]}...")
                     logger.warning(f"   X-Request-Id: {x_request_id}")
                     logger.warning(f"   Data ID: {data_id}")
-                    # No rechazamos el webhook, solo advertimos (como antes)
-                else:
-                    logger.info("✅ Firma verificada correctamente con formato oficial")
+                    # Opcional: Si quieres rechazar firmas inválidas, raise HTTPException(403) aquí
+                    # Por ahora, procesamos pero logueamos
+        
         else:
             logger.warning(f"⚠️ Empresa {empresa.id} NO tiene clave secreta configurada")
             logger.warning("   Procesando sin verificación (NO recomendado en producción)")
         
         # ======================
-        # 9. PROCESAR SEGÚN TIPO
+        # 8. PROCESAR SEGÚN TIPO (encolar si es payment)
         # ======================
         if webhook_type == "payment":
             if not payment_id and not external_reference:
                 logger.error("❌ Webhook payment sin payment_id ni external_reference")
-                raise HTTPException(status_code=400, detail="Missing payment data")
+                return response_base
             
             background_tasks.add_task(
                 process_mercado_pago_notification,
-                payment_data,
-                notification_id,
-                db
+                payment_data=webhook_data,  # Pasamos todo el dict
+                notification_id=notification_id,
+                db=db
             )
             
             logger.info(f"📝 Webhook encolado para procesamiento en background")
             logger.info(f"   Empresa: {empresa.nombre}")
             logger.info(f"   Transacción: {transaction.transaccion_id}")
             
-            return {
-                "status": "received",
-                "message": "Webhook received and queued for processing",
+            response_base.update({
                 "notification_id": notification_id,
                 "type": webhook_type,
                 "empresa": {
@@ -474,42 +446,33 @@ async def mercado_pago_webhook(
                     "external_reference": transaction.external_reference
                 },
                 "signature_verified": signature_verified,
-                "data_id": data_id,
-                "received_at": datetime.utcnow().isoformat()
-            }
+                "data_id": data_id
+            })
+            return response_base
         
         elif webhook_type == "test":
             logger.info("🧪 Webhook de prueba procesado correctamente")
-            return {
-                "status": "ok",
+            response_base.update({
                 "message": "Test webhook received successfully",
                 "notification_id": notification_id,
                 "empresa": empresa.nombre if empresa else None,
-                "signature_verified": signature_verified,
-                "timestamp": datetime.utcnow().isoformat()
-            }
+                "signature_verified": signature_verified
+            })
+            return response_base
         
         else:
             logger.info(f"📄 Webhook de tipo '{webhook_type}' recibido (solo logged)")
-            return {
-                "status": "ok",
+            response_base.update({
                 "message": f"Webhook type '{webhook_type}' received",
                 "notification_id": notification_id,
                 "empresa": empresa.nombre if empresa else None,
-                "signature_verified": signature_verified,
-                "timestamp": datetime.utcnow().isoformat()
-            }
+                "signature_verified": signature_verified
+            })
+            return response_base
             
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"💥 ERROR NO CONTROLADO en webhook: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="Internal server error processing webhook"
-        )
-
-
+        return response_base  # Siempre 200, pero logueamos error
 
 @router.post("/empresa/{empresa_id}/configurar-webhook")
 async def configurar_webhook_empresa(

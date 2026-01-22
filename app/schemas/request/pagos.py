@@ -30,5 +30,6 @@ class PaymentRequest(BaseModel):
     # Flag para conexión automática
     auto_connect: bool = Field(False, alias="conexion_automatica")
 
-    class Config:
-        allow_population_by_field_name = True
+    model_config = {
+        "populate_by_name": True
+    }
