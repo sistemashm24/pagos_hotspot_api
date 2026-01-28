@@ -208,3 +208,60 @@ async def listar_mis_transacciones(
             for t in transacciones
         ]
     }
+
+
+
+class RouterUpdate(BaseModel):
+    nombre: str | None = None
+    host: str | None = None
+    puerto: int | None = 8728
+    usuario: str | None = None
+    password_encrypted: str | None = None
+    ubicacion: str | None = None
+
+
+@router.put("/mi-empresa/routers/{router_id}")
+async def actualizar_router_mi_empresa(
+    router_id: str,
+    data: RouterUpdate,
+    usuario = Depends(require_cliente_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(
+        select(Router).where(
+            Router.id == router_id,
+            Router.empresa_id == usuario.empresa_id
+        )
+    )
+    router_obj = result.scalar_one_or_none()
+
+    if not router_obj:
+        raise HTTPException(
+            status_code=404,
+            detail="Router no encontrado o no pertenece a tu empresa"
+        )
+
+    datos = data.model_dump(exclude_unset=True)
+
+    # Puerto por default
+    if "puerto" not in datos:
+        datos["puerto"] = 8728
+
+    for campo, valor in datos.items():
+        setattr(router_obj, campo, valor)
+
+    await db.commit()
+    await db.refresh(router_obj)
+
+    return {
+        "message": "Router actualizado correctamente",
+        "router": {
+            "id": router_obj.id,
+            "nombre": router_obj.nombre,
+            "host": router_obj.host,
+            "puerto": router_obj.puerto,
+            "usuario": router_obj.usuario,
+            "ubicacion": router_obj.ubicacion,
+            "activo": router_obj.activo
+        }
+    }
