@@ -28,9 +28,29 @@ MAC_REGEX = re.compile(
 )
 
 def es_mac(valor: str) -> bool:
+    """
+    Detecta si el valor es una dirección MAC **con separadores obligatorios**.
+    Solo acepta formatos con : o - (no cadenas continuas de hex).
+    """
     if not valor:
         return False
-    return bool(MAC_REGEX.match(valor.strip()))
+    
+    cleaned = valor.strip()
+    
+    # Primero: regex estricto (tu original) → requiere exactamente 5 separadores
+    if MAC_REGEX.match(cleaned):
+        return True
+    
+    # Segundo: versiones más flexibles pero **siempre con separadores**
+    # Normalizamos a : y verificamos que haya al menos 5 separadores
+    normalized = cleaned.upper().replace("-", ":").replace(".", ":")
+    groups = re.findall(r'[0-9A-F]{2}', normalized)
+    
+    # Debe tener exactamente 6 grupos hex y al menos 5 separadores :
+    if len(groups) == 6 and normalized.count(':') >= 5:
+        return True
+    
+    return False
 
 
 # ========== SCHEMAS ==========
@@ -181,10 +201,9 @@ async def auto_reconnect(
         # 1.1 BLOQUEO: username NO puede ser una MAC
         # ─────────────────────────────────────────────
         if es_mac(request.username):
-            print(f"⛔ Username es una MAC ({request.username}) → no se intenta conexión")
-
+            print(f"⛔ Username es una MAC con separadores ({request.username}) → rechazado")
             response_base.update(
-                estado="expirado",                
+                estado="expirado",
                 mensaje="Usuario no encontrado"
             )
             return response_base
