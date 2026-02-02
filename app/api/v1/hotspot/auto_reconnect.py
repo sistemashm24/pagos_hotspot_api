@@ -21,6 +21,18 @@ import traceback
 
 router = APIRouter(tags=["Hotspot - Reconexión Automática"])
 
+import re
+
+MAC_REGEX = re.compile(
+    r'^([0-9A-Fa-f]{2}[:\-]){5}([0-9A-Fa-f]{2})$'
+)
+
+def es_mac(valor: str) -> bool:
+    if not valor:
+        return False
+    return bool(MAC_REGEX.match(valor.strip()))
+
+
 # ========== SCHEMAS ==========
 class AutoReconnectRequest(BaseModel):
     username: str = Field(..., description="Usuario hotspot guardado en localStorage")
@@ -164,6 +176,20 @@ async def auto_reconnect(
             )
             return response_base
 
+
+        # ─────────────────────────────────────────────
+        # 1.1 BLOQUEO: username NO puede ser una MAC
+        # ─────────────────────────────────────────────
+        if es_mac(request.username):
+            print(f"⛔ Username es una MAC ({request.username}) → no se intenta conexión")
+
+            response_base.update(
+                estado="expirado",                
+                mensaje="Usuario no encontrado"
+            )
+            return response_base
+
+
         # ─────────────────────────────────────────────
         # 2. OBTENER USUARIO DESDE MIKROTIK
         # ─────────────────────────────────────────────
@@ -181,14 +207,6 @@ async def auto_reconnect(
             response_base.update(
                 estado="expirado",
                 mensaje="Usuario no encontrado"
-            )
-            return response_base
-
-        if info_usuario.get("disabled"):
-            response_base.update(
-                estado="activo",
-                mensaje="Usuario deshabilitado",
-                datos_sesion=info_usuario["datos_usuario"]
             )
             return response_base
 
@@ -240,53 +258,87 @@ async def auto_reconnect(
                                 "mac-address": mac_cookie
                             }
                         )
-                
-                # 3.2 Crear usuario copia (_RANDMACn) SIN MAC
-                base_name = request.username
-                ext = 1
 
-                while True:
-                    copy_name = f"{base_name}_RANDMAC{ext}"
-                    existe = list(
+                # 3.2 ← LÓGICA FINAL: Reutilizar original o _RANDMACn (con límite)
+                # ────────────────────────────────────────────────────────────────
+                mac_lower = request.current_mac.lower().strip()
+                print(f"   [3.2 OPTIMIZED] Verificando MAC {request.current_mac} ({mac_lower}) "
+                      f"para usuario base '{request.username}'")
+
+                username_login = request.username  # valor por defecto
+
+                # 1. Checar si coincide con el usuario original (sin consulta extra)
+                mac_original = (datos_usuario.get("mac-address") or "").strip().lower()
+                if mac_original == mac_lower:
+                    print(f"   • MAC coincide con usuario ORIGINAL → reutilizando {request.username}")
+                else:
+                    # 2. UNA SOLA CONSULTA: todos los usuarios que tengan exactamente esta MAC
+                    usuarios_con_mac = list(
                         api.connection
                         .path("/ip/hotspot/user")
-                        .select(".id")
-                        .where(Key("name") == copy_name)
+                        .select(".id", "name", "mac-address")
+                        .where(Key("mac-address") == mac_lower)
                     )
-                    if not existe:
-                        break
-                    ext += 1
 
-                print(f"   • Creando usuario RANDMAC {copy_name}")
+                    found_randmac = None
+                    max_ext = 0
+                    base_prefix = f"{request.username}_RANDMAC"
+                    MAX_RANDMAC = 15
 
+                    # Procesamos los resultados en Python (normalmente 0 o 1 resultado)
+                    for u in usuarios_con_mac:
+                        name = u.get("name", "").strip()
+                        if name.startswith(base_prefix):
+                            try:
+                                ext_num = int(name[len(base_prefix):])
+                                max_ext = max(max_ext, ext_num)
+                                found_randmac = name
+                                username_login = name
+                                print(f"   • MAC encontrada en {name} (ext {ext_num}) → reutilizando")
+                                break  # Podemos romper aquí si solo esperamos uno
+                            except ValueError:
+                                continue
 
-                api.connection.path("/ip/hotspot/user").add(
-                    name=copy_name,
-                    password=info_usuario["password"],
-                    profile=datos_usuario.get("profile", "default"),
-                    comment=datos_usuario.get("comment", ""),
-                    disabled="no"
-                )
+                    if found_randmac:
+                        print(f"   • Reutilizando _RANDMAC encontrado: {username_login}")
+                    else:
+                        # No encontramos → creamos en el siguiente número después del máximo
+                        next_ext = max_ext + 1
+                        if next_ext > MAX_RANDMAC:
+                            print(f"   • Límite de {MAX_RANDMAC} _RANDMAC alcanzado → "
+                                  f"fallback a original: {request.username}")
+                            # username_login ya es request.username
+                        else:
+                            copy_name = f"{request.username}_RANDMAC{next_ext}"
+                            print(f"   • No encontrada → creando {copy_name}")
 
-                # 3.3 Asignar MAC al usuario copia
-                nuevo = list(
-                    api.connection
-                    .path("/ip/hotspot/user")
-                    .select(".id")
-                    .where(Key("name") == copy_name)
-                )
+                            api.connection.path("/ip/hotspot/user").add(
+                                name=copy_name,
+                                password=info_usuario["password"],
+                                profile=datos_usuario.get("profile", "default"),
+                                comment=datos_usuario.get("comment", ""),
+                                disabled="no"
+                            )
 
-                if nuevo:
-                    api.connection.path("/ip/hotspot/user").update(
-                        **{
-                            ".id": nuevo[0][".id"],
-                            "mac-address": request.current_mac
-                        }
-                    )
-                    print(f"   • MAC {request.current_mac} asignada a {copy_name}")
+                            nuevo = list(
+                                api.connection
+                                .path("/ip/hotspot/user")
+                                .select(".id")
+                                .where(Key("name") == copy_name)
+                            )
 
-                    # 👇 ESTE ES EL CAMBIO CLAVE
-                    username_login = copy_name
+                            if nuevo:
+                                api.connection.path("/ip/hotspot/user").update(
+                                    **{
+                                        ".id": nuevo[0][".id"],
+                                        "mac-address": request.current_mac
+                                    }
+                                )
+                                print(f"   • MAC {request.current_mac} asignada a {copy_name}")
+                                username_login = copy_name
+                            else:
+                                print("   • Falló obtener/crear nuevo usuario → fallback original")
+                            # username_login ya es request.username
 
             except Exception as e:
                 print("💥 Error en lógica especial:", str(e))
