@@ -280,23 +280,24 @@ async def auto_reconnect(
 
                 # 3.2 ← LÓGICA FINAL: Reutilizar original o _RANDMACn (con límite)
                 # ────────────────────────────────────────────────────────────────
-                mac_lower = request.current_mac.lower().strip()
-                print(f"   [3.2 OPTIMIZED] Verificando MAC {request.current_mac} ({mac_lower}) "
+                mac_normalized = request.current_mac.upper().strip().replace("-", ":").replace(".", ":")
+                print(f"   [3.2 OPTIMIZED] Verificando MAC {request.current_mac} → normalizada: {mac_normalized} "
                       f"para usuario base '{request.username}'")
 
                 username_login = request.username  # valor por defecto
 
-                # 1. Checar si coincide con el usuario original (sin consulta extra)
-                mac_original = (datos_usuario.get("mac-address") or "").strip().lower()
-                if mac_original == mac_lower:
+                # 1. Checar si coincide con el usuario original (normalizado)
+                mac_original_raw = (datos_usuario.get("mac-address") or "").strip()
+                mac_original = mac_original_raw.upper().replace("-", ":").replace(".", ":")
+                if mac_original == mac_normalized:
                     print(f"   • MAC coincide con usuario ORIGINAL → reutilizando {request.username}")
                 else:
-                    # 2. UNA SOLA CONSULTA: todos los usuarios que tengan exactamente esta MAC
+                    # 2. UNA SOLA CONSULTA: todos los usuarios con esta MAC (normalizada)
                     usuarios_con_mac = list(
                         api.connection
                         .path("/ip/hotspot/user")
                         .select(".id", "name", "mac-address")
-                        .where(Key("mac-address") == mac_lower)
+                        .where(Key("mac-address") == mac_normalized)  # ← normalizada
                     )
 
                     found_randmac = None
