@@ -255,7 +255,7 @@ async def auto_reconnect(
                 api.open()
 
                 # 3.1 Asignar MAC al usuario original (si no tiene)
-                mac_actual = (datos_usuario.get("mac-address") or "").strip()
+                """ mac_actual = (datos_usuario.get("mac-address") or "").strip()
 
                 if not mac_actual:
                     print("   • Usuario sin MAC → buscando cookie")
@@ -276,7 +276,7 @@ async def auto_reconnect(
                                 ".id": datos_usuario[".id"],
                                 "mac-address": mac_cookie
                             }
-                        )
+                        ) """
 
                 # 3.2 ← LÓGICA FINAL: Reutilizar original o _RANDMACn (con límite)
                 # ────────────────────────────────────────────────────────────────
