@@ -36,6 +36,7 @@ class ProductoUpdateRequest(BaseModel):
     descripcion: Optional[str] = None
     imagen_url: Optional[str] = None
     precio: Optional[float] = None
+    moneda: Optional[str] = None
     detalles: Optional[List[Dict[str, Any]]] = None
     activo: Optional[bool] = None
     orden_visual: Optional[int] = None
@@ -85,38 +86,74 @@ async def crear_producto(
     usuario = Depends(require_cliente_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    result = await db.execute(
+    """
+    Crea un nuevo producto asociado a un router y un perfil de MikroTik.
+    Valida que no exista ya un producto con la misma combinación:
+    empresa + router + perfil_mikrotik_id
+    """
+    # 1. Verificar que el router existe y pertenece a la empresa del usuario
+    router_result = await db.execute(
         select(Router).where(
             Router.id == producto_data.router_id,
             Router.empresa_id == usuario.empresa_id
         )
     )
-    router = result.scalar_one_or_none()
+    router = router_result.scalar_one_or_none()
 
     if not router:
-        raise HTTPException(status_code=404, detail="Router no encontrado")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Router no encontrado o no pertenece a esta empresa"
+        )
 
-    producto = Producto(
-        empresa_id=usuario.empresa_id,
-        router_id=producto_data.router_id,
-        perfil_mikrotik_id=producto_data.perfil_mikrotik_id,
-        perfil_mikrotik_nombre=producto_data.perfil_mikrotik_nombre,
-        nombre_venta=producto_data.nombre_venta,
-        descripcion=producto_data.descripcion,
-        imagen_url=producto_data.imagen_url,
-        precio=producto_data.precio,
-        moneda=producto_data.moneda,
-        detalles=producto_data.detalles or [],
-        activo=producto_data.activo,
-        orden_visual=producto_data.orden_visual,
-        destacado=producto_data.destacado
+    # 2. Verificar que NO exista ya un producto con esta combinación única
+    existing_product = await db.execute(
+        select(Producto).where(
+            Producto.empresa_id == usuario.empresa_id,
+            Producto.router_id == producto_data.router_id,
+            Producto.perfil_mikrotik_id == producto_data.perfil_mikrotik_id
+        ).limit(1)
     )
 
-    db.add(producto)
-    await db.commit()
-    await db.refresh(producto)
+    if existing_product.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Ya existe un producto con el perfil '{producto_data.perfil_mikrotik_id}' "
+                f"para este router ({producto_data.router_id})"
+            )
+        )
 
-    return ProductoResponse.model_validate(producto)
+    # 3. Todo validado → crear el nuevo producto
+    try:
+        nuevo_producto = Producto(
+            empresa_id=usuario.empresa_id,
+            router_id=producto_data.router_id,
+            perfil_mikrotik_id=producto_data.perfil_mikrotik_id,
+            perfil_mikrotik_nombre=producto_data.perfil_mikrotik_nombre,
+            nombre_venta=producto_data.nombre_venta,
+            descripcion=producto_data.descripcion,
+            imagen_url=producto_data.imagen_url,
+            precio=producto_data.precio,
+            moneda=producto_data.moneda,
+            detalles=producto_data.detalles or [],
+            activo=producto_data.activo,
+            orden_visual=producto_data.orden_visual,
+            destacado=producto_data.destacado
+        )
+
+        db.add(nuevo_producto)
+        await db.commit()
+        await db.refresh(nuevo_producto)
+
+        return ProductoResponse.model_validate(nuevo_producto)
+
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al crear el producto: {str(exc)}"
+        )
 
 
 @router.get("/products", response_model=List[ProductoResponse])
@@ -178,6 +215,12 @@ async def actualizar_producto(
     usuario = Depends(require_cliente_admin),
     db: AsyncSession = Depends(get_db)
 ):
+    """
+    Actualiza un producto existente.
+    Permite modificar: nombre_venta, descripcion, imagen_url, precio, moneda,
+    detalles, activo, orden_visual, destacado.
+    """
+    # 1. Buscar el producto y verificar que pertenece a la empresa del usuario
     result = await db.execute(
         select(Producto).where(
             Producto.id == producto_id,
@@ -187,15 +230,37 @@ async def actualizar_producto(
     producto = result.scalar_one_or_none()
 
     if not producto:
-        raise HTTPException(status_code=404, detail="Producto no encontrado")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Producto no encontrado o no pertenece a esta empresa"
+        )
 
-    for field, value in producto_data.dict(exclude_unset=True).items():
-        setattr(producto, field, value)
+    # 2. Obtener los datos enviados (solo los campos que se quieren actualizar)
+    datos_actualizar = producto_data.dict(exclude_unset=True)
 
-    await db.commit()
-    await db.refresh(producto)
+    # 3. Actualizar solo los campos que vinieron en la petición
+    for campo, valor in datos_actualizar.items():
+        # Validación adicional opcional para moneda
+        if campo == "moneda":
+            if valor not in ["MXN", "USD", "EUR"]:  # ← puedes ajustar los valores permitidos
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Moneda no válida. Valores permitidos: MXN, USD, EUR"
+                )
+        
+        setattr(producto, campo, valor)
 
-    return ProductoResponse.model_validate(producto)
+    try:
+        await db.commit()
+        await db.refresh(producto)
+        return ProductoResponse.model_validate(producto)
+
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al actualizar el producto: {str(exc)}"
+        )
 
 
 @router.delete("/products/{producto_id}")
