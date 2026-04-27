@@ -10,6 +10,7 @@ class Empresa(Base):
     nombre = Column(String(100), nullable=False)
     contacto_email = Column(String(100))
     contacto_telefono = Column(String(20))
+    logo_url = Column(String(255), nullable=True)
     
     # CONFIGURACIÓN CONEKTA DEL CLIENTE
     conekta_private_key = Column(String(100), nullable=False)

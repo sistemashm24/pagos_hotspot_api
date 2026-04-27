@@ -12,8 +12,9 @@ print(f"Python path: {sys.path}")
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
 from datetime import datetime, timezone
 
@@ -124,6 +125,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Archivos estáticos (Logos)
+static_path = Path("static")
+logos_path = static_path / "logos"
+logos_path.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Cargar dinámicamente cada módulo
 for module_path, config in modulos_config.items():

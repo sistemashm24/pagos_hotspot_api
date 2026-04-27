@@ -1,5 +1,9 @@
 # app/api/v1/admin/empresa.py
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile
+import os
+import shutil
+import uuid
+from pathlib import Path
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -20,11 +24,17 @@ class ConektaConfigUpdate(BaseModel):
     conekta_public_key: str
     conekta_mode: str = "test"
 
+class EmpresaUpdate(BaseModel):
+    nombre: str | None = None
+    contacto_email: str | None = None
+    contacto_telefono: str | None = None
+
 class EmpresaInfoResponse(BaseModel):
     id: str
     nombre: str
     contacto_email: str
     contacto_telefono: str = None
+    logo_url: str = None
     conekta_mode: str
     conekta_public_key: str
     activa: bool
@@ -48,6 +58,36 @@ async def obtener_info_mi_empresa(
         )
     
     return empresa
+
+@router.put("/mi-empresa")
+async def actualizar_info_empresa(
+    data: EmpresaUpdate,
+    usuario = Depends(require_cliente_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """Actualizar información básica de MI empresa"""
+    empresa = await db.get(Empresa, usuario.empresa_id)
+    if not empresa:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Empresa no encontrada"
+        )
+    
+    update_data = data.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(empresa, key, value)
+    
+    await db.commit()
+    await db.refresh(empresa)
+    
+    return {
+        "message": "Información de la empresa actualizada correctamente",
+        "empresa": {
+            "nombre": empresa.nombre,
+            "contacto_email": empresa.contacto_email,
+            "contacto_telefono": empresa.contacto_telefono
+        }
+    }
 
 @router.put("/mi-empresa/conekta-config")
 async def actualizar_config_conekta(
@@ -73,6 +113,53 @@ async def actualizar_config_conekta(
         "message": "Configuración de Conekta actualizada",
         "conekta_mode": empresa.conekta_mode,
         "public_key_updated": True
+    }
+
+@router.post("/mi-empresa/logo")
+async def subir_logo_empresa(
+    file: UploadFile = File(...),
+    usuario = Depends(require_cliente_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """Subir o actualizar el logo de la empresa"""
+    empresa = await db.get(Empresa, usuario.empresa_id)
+    if not empresa:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    
+    # Validar extensión
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in [".jpg", ".jpeg", ".png", ".webp"]:
+        raise HTTPException(status_code=400, detail="Formato de imagen no permitido")
+    
+    # Generar nombre único
+    filename = f"logo_{empresa.id}_{uuid.uuid4().hex[:6]}{ext}"
+    static_dir = Path("static/logos")
+    static_dir.mkdir(parents=True, exist_ok=True)
+    
+    file_path = static_dir / filename
+    
+    # Guardar archivo
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al guardar el archivo: {str(e)}")
+    
+    # Eliminar logo anterior si existe
+    if empresa.logo_url and "static/logos/" in empresa.logo_url:
+        old_path = Path(empresa.logo_url.split("/")[-2] + "/" + empresa.logo_url.split("/")[-1])
+        # Esto es complejo por el host, mejor solo guardar el path relativo o absoluto
+        # Para simplificar, guardaremos el path relativo accesible vía web
+    
+    # Actualizar URL del logo (usamos path relativo para que el cliente construya la URL completa)
+    empresa.logo_url = f"/static/logos/{filename}"
+    
+    await db.commit()
+    await db.refresh(empresa)
+    
+    return {
+        "message": "Logo actualizado correctamente",
+        "logo_url": empresa.logo_url
     }
 
 @router.get("/mi-empresa/dashboard")
