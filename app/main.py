@@ -12,6 +12,13 @@ print(f"Python path: {sys.path}")
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
+# Forzar salida en UTF-8 para evitar errores en Windows
+try:
+    if sys.stdout.encoding.lower() != 'utf-8':
+        sys.stdout.reconfigure(encoding='utf-8')
+except (AttributeError, Exception):
+    pass
+
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -142,14 +149,14 @@ for module_path, config in modulos_config.items():
         if hasattr(module, config["router_name"]):
             router = getattr(module, config["router_name"])
             app.include_router(router, prefix=config["prefix"], tags=config["tags"])
-            print(f"✅ {module_path} cargado en {config['prefix']}")
+            print(f"[OK] {module_path} cargado en {config['prefix']}")
         else:
-            print(f"⚠️  {module_path} no tiene '{config['router_name']}'")
+            print(f"[WARN] {module_path} no tiene '{config['router_name']}'")
             
     except ModuleNotFoundError as e:
-        print(f"❌ No se pudo encontrar {module_path}: {e}")
+        print(f"[ERROR] No se pudo encontrar {module_path}: {e}")
     except Exception as e:
-        print(f"❌ Error cargando {module_path}: {e}")
+        print(f"[ERROR] Error cargando {module_path}: {e}")
 
 print("\n=== SERVIDOR LISTO ===")
 

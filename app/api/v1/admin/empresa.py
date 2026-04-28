@@ -20,9 +20,23 @@ router = APIRouter()
 
 # ========== SCHEMAS ==========
 class ConektaConfigUpdate(BaseModel):
-    conekta_private_key: str
-    conekta_public_key: str
+    conekta_private_key: str | None = None
+    conekta_public_key: str | None = None
     conekta_mode: str = "test"
+
+class ConektaConfigResponse(BaseModel):
+    message: str
+    configuracion_actual: dict
+
+class MercadoPagoConfigUpdate(BaseModel):
+    access_token: str | None = None
+    public_key: str | None = None
+    webhook_secret: str | None = None
+    mode: str = "test"
+
+class MercadoPagoConfigResponse(BaseModel):
+    message: str
+    configuracion_actual: dict
 
 class EmpresaUpdate(BaseModel):
     nombre: str | None = None
@@ -33,10 +47,12 @@ class EmpresaInfoResponse(BaseModel):
     id: str
     nombre: str
     contacto_email: str
-    contacto_telefono: str = None
-    logo_url: str = None
+    contacto_telefono: str | None = None
+    logo_url: str | None = None
     conekta_mode: str
-    conekta_public_key: str
+    conekta_public_key: str | None = None
+    mercado_pago_mode: str | None = "test"
+    mercado_pago_public_key: str | None = None
     activa: bool
     creada_en: datetime
     
@@ -95,25 +111,100 @@ async def actualizar_config_conekta(
     usuario = Depends(require_cliente_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    """Actualizar configuración de Conekta de MI empresa"""
+    """Actualizar configuración de Conekta de MI empresa (Endpoint antiguo)"""
     empresa = await db.get(Empresa, usuario.empresa_id)
     if not empresa:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Empresa no encontrada"
-        )
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
     
-    empresa.conekta_private_key = config_data.conekta_private_key
-    empresa.conekta_public_key = config_data.conekta_public_key
+    if config_data.conekta_private_key:
+        empresa.conekta_private_key = config_data.conekta_private_key
+    if config_data.conekta_public_key:
+        empresa.conekta_public_key = config_data.conekta_public_key
     empresa.conekta_mode = config_data.conekta_mode
     
     await db.commit()
+    return {"message": "Configuración de Conekta actualizada"}
+
+@router.get("/mi-empresa/conekta", response_model=ConektaConfigResponse)
+async def obtener_config_conekta(
+    usuario = Depends(require_cliente_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """Obtener configuración de Conekta de MI empresa"""
+    empresa = await db.get(Empresa, usuario.empresa_id)
+    if not empresa:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
     
     return {
-        "message": "Configuración de Conekta actualizada",
-        "conekta_mode": empresa.conekta_mode,
-        "public_key_updated": True
+        "message": "Configuración cargada",
+        "configuracion_actual": {
+            "conekta_public_key": empresa.conekta_public_key,
+            "conekta_mode": empresa.conekta_mode,
+            "conekta_private_key": "********" if empresa.conekta_private_key else None
+        }
     }
+
+@router.post("/mi-empresa/configurar-conekta")
+async def configurar_conekta(
+    data: ConektaConfigUpdate,
+    usuario = Depends(require_cliente_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """Configurar credenciales de Conekta (Nuevo endpoint usado por Desktop)"""
+    empresa = await db.get(Empresa, usuario.empresa_id)
+    if not empresa:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    
+    if data.conekta_private_key:
+        empresa.conekta_private_key = data.conekta_private_key
+    if data.conekta_public_key:
+        empresa.conekta_public_key = data.conekta_public_key
+    empresa.conekta_mode = data.conekta_mode
+    
+    await db.commit()
+    return {"message": "Credenciales de Conekta actualizadas correctamente"}
+
+@router.get("/mi-empresa/mercado-pago", response_model=MercadoPagoConfigResponse)
+async def obtener_config_mercado_pago(
+    usuario = Depends(require_cliente_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """Obtener configuración de Mercado Pago de MI empresa"""
+    empresa = await db.get(Empresa, usuario.empresa_id)
+    if not empresa:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    
+    return {
+        "message": "Configuración cargada",
+        "configuracion_actual": {
+            "access_token": "********" if empresa.mercado_pago_access_token else None,
+            "public_key": empresa.mercado_pago_public_key,
+            "mode": empresa.mercado_pago_mode,
+            "webhook_secret": "********" if empresa.mercado_pago_webhook_secret else None
+        }
+    }
+
+@router.post("/mi-empresa/configurar-credenciales")
+async def configurar_mercado_pago(
+    data: MercadoPagoConfigUpdate,
+    usuario = Depends(require_cliente_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """Configurar credenciales de Mercado Pago"""
+    empresa = await db.get(Empresa, usuario.empresa_id)
+    if not empresa:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    
+    if data.access_token:
+        empresa.mercado_pago_access_token = data.access_token
+    if data.public_key:
+        empresa.mercado_pago_public_key = data.public_key
+    if data.webhook_secret:
+        empresa.mercado_pago_webhook_secret = data.webhook_secret
+    empresa.mercado_pago_mode = data.mode
+    
+    await db.commit()
+    return {"message": "Credenciales de Mercado Pago actualizadas correctamente"}
 
 @router.post("/mi-empresa/logo")
 async def subir_logo_empresa(
