@@ -24,6 +24,7 @@ class MercadoPagoPaymentRequest(BaseModel):
     mac_address: Optional[str] = Field(None, alias="mac_cliente")
     ip_address: Optional[str] = Field(None, alias="ip_cliente")
     device_info: Optional[str] = Field(None, alias="info_dispositivo")
+    device_id: Optional[str] = Field(None, alias="device_id")
     
     # Flag para conexión automática
     auto_connect: bool = Field(False, alias="conexion_automatica")

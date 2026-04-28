@@ -316,6 +316,11 @@ class MercadoPagoService:
                 "x-idempotency-key": str(uuid.uuid4())
             }
             
+            # 🛡️ AGREGAR DEVICE ID EN HEADERS SI EXISTE
+            if payment_data.get("device_id"):
+                request_options.custom_headers["X-Mercado-Pago-Device-Id"] = payment_data["device_id"]
+                print(f"🛡️ Device ID agregado a headers: {payment_data['device_id'][:15]}...")
+            
             # CREAR PAGO
             print(f"\n📤 Enviando a Mercado Pago API...")
             payment_response = sdk.payment().create(mp_payload, request_options)

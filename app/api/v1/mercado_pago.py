@@ -225,6 +225,7 @@ async def pagar_hotspot_mercado_pago(
                 "customer_email": payment_data.customer_email,
                 "customer_name": payment_data.customer_name,
                 "customer_phone": payment_data.customer_phone,
+                "device_id": payment_data.device_id,
                 "payer": payment_data.payer or {"email": payment_data.customer_email}
             },
 
