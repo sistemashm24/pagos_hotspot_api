@@ -1,6 +1,6 @@
 # app/api/v1/mercado_pago.py
 from typing import Dict, Any, Literal, Optional, Tuple
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -14,6 +14,7 @@ from app.models.empresa import Empresa
 from app.models.usuario import Usuario
 from app.services.mercado_pago_service import mercado_pago_service
 from app.services.mikrotik_service import mikrotik_service
+from app.services.telegram_service import telegram_service
 from app.schemas.request.mercado_pago import MercadoPagoPaymentRequest
 from app.models.producto import Producto
 from app.models.transaccion import Transaccion
@@ -84,6 +85,7 @@ def validar_estado_mercado_pago(payment_result: Dict[str, Any]) -> Tuple[bool, s
 )
 async def pagar_hotspot_mercado_pago(
     payment_data: MercadoPagoPaymentRequest,
+    background_tasks: BackgroundTasks,
     auth_data = Depends(require_api_key),
     db: AsyncSession = Depends(get_db)
 ):
@@ -258,6 +260,29 @@ async def pagar_hotspot_mercado_pago(
         
         print(f"✅✅✅ PAGO VALIDADO Y APROBADO")
         
+        # 📢 Notificar Pago Aprobado (Telegram)
+        if empresa.notificaciones_telegram:
+            # Construir info de credenciales según tipo
+            cred_info = f"🔑 <b>PIN:</b> <code>{credentials['password']}</code>" if user_type == "pin" else \
+                        f"👤 <b>Usuario:</b> <code>{credentials['username']}</code>\n🔑 <b>Contraseña:</b> <code>{credentials['password']}</code>"
+
+            msg_exito = (
+                f"✅ <b>¡Pago Aprobado!</b>\n"
+                f"🏢 <b>Empresa:</b> {empresa.nombre}\n"
+                f"📦 <b>Plan:</b> {producto.nombre_venta}\n"
+                f"💰 <b>Monto:</b> ${producto.precio} {producto.moneda}\n"
+                f"👤 <b>Cliente:</b> {payment_data.customer_name}\n"
+                f"🆔 <b>Transacción:</b> <code>{payment_result['payment_id']}</code>\n"
+                f"{cred_info}\n"
+                f"🔥 <i>Acceso WiFi entregado correctamente.</i>"
+            )
+            background_tasks.add_task(
+                telegram_service.send_message,
+                empresa.telegram_bot_token,
+                empresa.telegram_chat_id,
+                msg_exito
+            )
+        
         # 7. Guardar transacción
         print(f"\n💾 GUARDANDO TRANSACCIÓN EN BD...")
         
@@ -409,6 +434,23 @@ async def pagar_hotspot_mercado_pago(
             print(f"🔄 EJECUTANDO ROLLBACK POR PAGO RECHAZADO...")
             await rollback_usuario(router, credentials["username"], user_type)
         
+        # 📢 Notificar Pago Rechazado (Telegram)
+        if empresa.notificaciones_telegram and http_exc.status_code == 402:
+            msg_rechazo = (
+                f"❌ <b>Pago Rechazado</b>\n"
+                f"🏢 <b>Empresa:</b> {empresa.nombre}\n"
+                f"📦 <b>Plan:</b> {producto.nombre_venta}\n"
+                f"💰 <b>Monto:</b> ${producto.precio} {producto.moneda}\n"
+                f"👤 <b>Cliente:</b> {payment_data.customer_name}\n"
+                f"⚠️ <b>Motivo:</b> {http_exc.detail}"
+            )
+            background_tasks.add_task(
+                telegram_service.send_message,
+                empresa.telegram_bot_token,
+                empresa.telegram_chat_id,
+                msg_rechazo
+            )
+        
         await db.rollback()
         raise http_exc
         
@@ -507,6 +549,10 @@ class MercadoPagoCredentials(BaseModel):
         "test",
         json_schema_extra={"description": "Modo de operación"}
     )
+    # Telegram fields
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
+    notificaciones_telegram: Optional[bool] = None
 
 
 @router.post("/configurar-credenciales",
@@ -562,6 +608,19 @@ async def configurar_credenciales_mercado_pago(
         empresa.mercado_pago_mode = datos.mode
         updated_fields.append("mode")
 
+    # Telegram Config
+    if datos.telegram_bot_token is not None:
+        empresa.telegram_bot_token = datos.telegram_bot_token.strip() or None
+        updated_fields.append("telegram_bot_token")
+    
+    if datos.telegram_chat_id is not None:
+        empresa.telegram_chat_id = datos.telegram_chat_id.strip() or None
+        updated_fields.append("telegram_chat_id")
+        
+    if datos.notificaciones_telegram is not None:
+        empresa.notificaciones_telegram = datos.notificaciones_telegram
+        updated_fields.append("notificaciones_telegram")
+
     # Si no hay cambios → informar
     if not updated_fields:
         return {
@@ -572,7 +631,9 @@ async def configurar_credenciales_mercado_pago(
                 "access_token": bool(empresa.mercado_pago_access_token),
                 "webhook_secret": bool(empresa.mercado_pago_webhook_secret),
                 "public_key": bool(empresa.mercado_pago_public_key),
-                "mode": empresa.mercado_pago_mode
+                "mode": empresa.mercado_pago_mode,
+                "telegram_configurado": bool(empresa.telegram_bot_token and empresa.telegram_chat_id),
+                "telegram_activo": empresa.notificaciones_telegram
             }
         }
 
@@ -588,6 +649,8 @@ async def configurar_credenciales_mercado_pago(
             "access_token": bool(empresa.mercado_pago_access_token),
             "webhook_secret": bool(empresa.mercado_pago_webhook_secret),
             "public_key": bool(empresa.mercado_pago_public_key),
-            "mode": empresa.mercado_pago_mode
+            "mode": empresa.mercado_pago_mode,
+            "telegram_configurado": bool(empresa.telegram_bot_token and empresa.telegram_chat_id),
+            "telegram_activo": empresa.notificaciones_telegram
         }
     }

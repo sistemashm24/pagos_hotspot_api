@@ -17,6 +17,7 @@ from app.models.producto import Producto
 from app.models.transaccion import Transaccion
 
 router = APIRouter()
+print("\n🔥 >>> CARGANDO: app.api.v1.admin.empresa <<< 🔥\n")
 
 # ========== SCHEMAS ==========
 class ConektaConfigUpdate(BaseModel):
@@ -42,6 +43,9 @@ class EmpresaUpdate(BaseModel):
     nombre: str | None = None
     contacto_email: str | None = None
     contacto_telefono: str | None = None
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+    notificaciones_telegram: bool | None = None
 
 class EmpresaInfoResponse(BaseModel):
     id: str
@@ -55,9 +59,49 @@ class EmpresaInfoResponse(BaseModel):
     mercado_pago_public_key: str | None = None
     activa: bool
     creada_en: datetime
+    telegram_bot_token: str | None = None
+    telegram_chat_id: str | None = None
+    notificaciones_telegram: bool = False
     
     class Config:
         from_attributes = True
+
+class TelegramTestRequest(BaseModel):
+    token: str | None = None
+    chat_id: str | None = None
+
+@router.post("/test-telegram")
+async def probar_telegram(
+    data: TelegramTestRequest,
+    usuario = Depends(require_cliente_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """Enviar un mensaje de prueba a Telegram (Permite probar datos no guardados)"""
+    from app.services.telegram_service import telegram_service
+    
+    empresa = await db.get(Empresa, usuario.empresa_id)
+    if not empresa:
+        raise HTTPException(status_code=404, detail="Empresa no encontrada")
+    
+    # Usar datos enviados en la petición o caer de vuelta a los de la BD
+    bot_token = data.token or empresa.telegram_bot_token
+    chat_id = data.chat_id or empresa.telegram_chat_id
+    
+    if not bot_token or not chat_id:
+        raise HTTPException(status_code=400, detail="Faltan credenciales (Token o Chat ID)")
+    
+    msg = (
+        f"⚡ <b>Prueba de Conexión en Vivo</b>\n"
+        f"🏢 Empresa: {empresa.nombre}\n"
+        f"✅ ¡Tus credenciales son correctas!"
+    )
+    
+    success = await telegram_service.send_message(bot_token, chat_id, msg)
+    
+    if not success:
+        raise HTTPException(status_code=500, detail="Error de Telegram. Verifica que el Token sea válido y que hayas iniciado chat con el bot.")
+    
+    return {"message": "Mensaje de prueba enviado con éxito"}
 
 # ========== ENDPOINTS ==========
 @router.get("/mi-empresa", response_model=EmpresaInfoResponse)
@@ -101,7 +145,10 @@ async def actualizar_info_empresa(
         "empresa": {
             "nombre": empresa.nombre,
             "contacto_email": empresa.contacto_email,
-            "contacto_telefono": empresa.contacto_telefono
+            "contacto_telefono": empresa.contacto_telefono,
+            "telegram_bot_token": empresa.telegram_bot_token,
+            "telegram_chat_id": empresa.telegram_chat_id,
+            "notificaciones_telegram": empresa.notificaciones_telegram
         }
     }
 
@@ -248,6 +295,11 @@ async def subir_logo_empresa(
     await db.commit()
     await db.refresh(empresa)
     
+    return {
+        "message": "Logo actualizado correctamente",
+        "logo_url": empresa.logo_url
+    }
+
     return {
         "message": "Logo actualizado correctamente",
         "logo_url": empresa.logo_url

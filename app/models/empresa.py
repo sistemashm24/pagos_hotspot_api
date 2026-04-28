@@ -22,8 +22,13 @@ class Empresa(Base):
     mercado_pago_public_key = Column(String(255), nullable=True)
     mercado_pago_mode = Column(String(20), default='test')  # 'test' o 'live'
 
-      # NUEVO: CLAVE SECRETA PARA WEBHOOK (IMPORTANTE)
+    # NUEVO: CLAVE SECRETA PARA WEBHOOK (IMPORTANTE)
     mercado_pago_webhook_secret = Column(String(255), nullable=True)
+
+    # NUEVO: Configuración Telegram
+    telegram_bot_token = Column(String(255), nullable=True)
+    telegram_chat_id = Column(String(50), nullable=True)
+    notificaciones_telegram = Column(Boolean, default=False)
 
     activa = Column(Boolean, default=True)
     creada_en = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
