@@ -46,7 +46,8 @@ def validar_estado_mercado_pago(payment_result: Dict[str, Any]) -> Tuple[bool, s
     Returns:
         tuple: (es_valido: bool, mensaje_error: str)
     """
-    status = payment_result.get("status", "").lower()
+    status_raw = payment_result.get("status", "")
+    status = str(status_raw).lower() if status_raw else ""
     
     # Estados válidos
     if status == "approved":
@@ -429,9 +430,9 @@ async def pagar_hotspot_mercado_pago(
         print(f"   • Detalle: {http_exc.detail}")
         print(f"   • Usuario creado: {usuario_creado}")
         
-        # Rollback si es error de pago (402) y el usuario fue creado
-        if usuario_creado and http_exc.status_code == 402:
-            print(f"🔄 EJECUTANDO ROLLBACK POR PAGO RECHAZADO...")
+        # Rollback si hay error (400+) y el usuario fue creado
+        if usuario_creado:
+            print(f"🔄 EJECUTANDO ROLLBACK POR ERROR EN PAGO ({http_exc.status_code})...")
             await rollback_usuario(router, credentials["username"], user_type)
         
         # 📢 Notificar Pago Rechazado (Telegram)
@@ -454,16 +455,15 @@ async def pagar_hotspot_mercado_pago(
         await db.rollback()
         raise http_exc
         
-    # 🔴 **MANEJO DE ERRORES INESPERADOS**
-    except Exception as e:
-        print(f"\n💥💥💥 ERROR INESPERADO")
-        print(f"   • Tipo: {type(e).__name__}")
-        print(f"   • Mensaje: {str(e)}")
-        print(f"   • Usuario creado: {usuario_creado}")
-        
+        # 🔥 FIX ROLLBACK: Await rollback instead of background task
+        if usuario_creado:
+            await rollback_usuario(router, credentials["username"], user_type)
+            
+        await db.rollback()
+
         error_exception = manejar_error_inesperado(
             error=e,
-            usuario_creado=usuario_creado,
+            usuario_creado=False, # Ponemos False para que manejar_error_inesperado no intente otro rollback
             router=router,
             credentials=credentials,
             db=db,

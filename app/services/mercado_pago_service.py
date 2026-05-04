@@ -282,8 +282,8 @@ class MercadoPagoService:
                 # 🟢 INFORMACIÓN DEL PAGADOR (nivel principal)
                 "payer": self._build_payer_info(payment_data),
                 
-                # 📊 METADATOS
-                "metadata": metadata or {},
+                # 📊 METADATOS (Asegurar que todos sean strings)
+                "metadata": {k: str(v) for k, v in metadata.items()} if metadata else {},
                 
                 # 🛒 INFORMACIÓN DE ITEMS (SOLO items e ip_address)
                 "additional_info": {
@@ -346,7 +346,15 @@ class MercadoPagoService:
             
             # Verificar si es un error 400
             if isinstance(payment, dict) and payment.get("status") == 400:
-                error_msg = payment.get("message", "Error de validación")
+                # 🔍 CAPTURAR DETALLES DEL ERROR (JSON completo)
+                error_body = {}
+                try:
+                    error_body = payment_response.get("response", {})
+                    print(f"📥 Respuesta de error completa: {json.dumps(error_body, indent=2)}")
+                except:
+                    pass
+
+                error_msg = error_body.get("message", "Error de validación")
                 print(f"❌ Error 400: {error_msg}")
                 
                 if "cause" in payment:
@@ -367,7 +375,8 @@ class MercadoPagoService:
             print(f"   • Status: {payment.get('status')}")
             
             # MANEJAR ESTADO DEL PAGO
-            status_value = payment.get("status", "").lower()
+            status_raw = payment.get("status", "")
+            status_value = str(status_raw).lower() if status_raw else ""
             
             if status_value == "approved":
                 print(f"🎉🎉🎉 PAGO APROBADO 🎉🎉🎉")
