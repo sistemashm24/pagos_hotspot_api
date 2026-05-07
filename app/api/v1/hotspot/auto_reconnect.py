@@ -77,6 +77,12 @@ def obtener_info_usuario_sync(host, port, user, password, hotspot_username):
 
 @router.post("/hotspot/auto-reconnect", response_model=AutoReconnectResponse)
 async def auto_reconnect(request: AutoReconnectRequest, auth_data=Depends(require_api_key), db: AsyncSession = Depends(get_db)):
+    from urllib.parse import unquote
+    
+    # Decodificar por si vienen de URL
+    request.username = unquote(request.username)
+    request.current_mac = unquote(request.current_mac)
+    
     print(f"\n🔄 RECONEXIÓN: {request.username} | MAC: {request.current_mac}")
     empresa, router_mikrotik, _ = auth_data
     response_base = {
