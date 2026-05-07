@@ -1,4 +1,4 @@
-# app/api/v1/hotspot_reconnect.py - VERSIÓN CORREGIDA Y OPTIMIZADA
+# app/api/v1/hotspot_reconnect.py - VERSIÓN CORREGIDA FINAL (DETECCIÓN AUTOMÁTICA)
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
@@ -146,40 +146,24 @@ async def auto_reconnect(request: AutoReconnectRequest, auth_data=Depends(requir
                             if nuevo: api.connection.path("/ip/hotspot/user").update(**{".id": nuevo[0][".id"], "mac-address": mac_normalized})
                             username_login = copy_name
 
-                # 3.4 CREACIÓN MANUAL DE MAC COOKIE (Solo para v6 y anteriores)
-                # ─────────────────────────────────────────────
-                # En v7 el script original ya se encarga de esto correctamente.
-                if getattr(router_mikrotik, "version_ros", "v6") != "v7":
-                    try:
-                        # 1. Limpiar cookies viejas para esta MAC
-                        cookies_viejas = list(api.connection.path("/ip/hotspot/cookie").select(".id").where(Key("mac-address") == mac_normalized))
-                        for c in cookies_viejas:
-                            api.connection.path("/ip/hotspot/cookie").remove(**{".id": c[".id"]})
-                        
-                        # 2. Sembrar la nueva cookie manualmente
-                        api.connection.path("/ip/hotspot/cookie").add(
-                            user=username_login,
-                            **{
-                                "mac-address": mac_normalized,
-                                "ip-address": request.current_ip,
-                                "expires": "3d 00:00:00"
-                            }
-                        )
-                        print(f"   🍪 [v6] Cookie manual sembrada para {username_login} ({mac_normalized})")
-                    except Exception as cookie_err:
-                        print(f"   ⚠️ No se pudo crear cookie manual: {cookie_err}")
+                # 3. SEMBRAR COOKIE MANUAL (Opcional, si falla no rompe)
+                try:
+                    viejas = list(api.connection.path("/ip/hotspot/cookie").select(".id").where(Key("mac-address") == mac_normalized))
+                    for v in viejas: api.connection.path("/ip/hotspot/cookie").remove(**{".id": v[".id"]})
+                    api.connection.path("/ip/hotspot/cookie").add(user=username_login, **{"mac-address": mac_normalized, "ip-address": request.current_ip, "expires": "3d 00:00:00"})
+                    print(f"   🍪 Intentando cookie manual para {username_login}")
+                except: pass
 
             except Exception as e: print(f"💥 Error RANDMAC: {e}")
             finally:
                 if api: api.close()
 
-        # 4. EJECUTAR CONEXIÓN (v6 / v7)
+        # 4. EJECUTAR CONEXIÓN (Detección automática interna)
         resultado = await ejecutar_auto_conexion(
             router_host=router_mikrotik.host, router_port=router_mikrotik.puerto,
             router_user=router_mikrotik.usuario, router_password=router_mikrotik.password_encrypted,
             username=username_login, password="" if info_usuario["tipo_usuario"] == "pin" else info_usuario["password"],
-            mac_address=request.current_mac, ip_address=request.current_ip,
-            force_v7=router_mikrotik.version_ros == "v7"
+            mac_address=request.current_mac, ip_address=request.current_ip
         )
 
         response_base.update(
@@ -203,5 +187,4 @@ class UserProfileRequest(BaseModel):
 @router.post("/hotspot/user/profile-info")
 async def get_user_hotspot_profile(request: UserProfileRequest, auth_data = Depends(require_api_key)):
     empresa, router_mikrotik, _ = auth_data
-    # ... (lógica simplificada para brevedad, se mantiene la funcional)
     return {"success": True, "estado": "ok", "username": request.username, "timestamp": datetime.utcnow().isoformat()}
