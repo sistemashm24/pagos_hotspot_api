@@ -71,9 +71,9 @@ class RouterAPIKeyInfo(BaseModel):
     issued_at: datetime
     expires_at: datetime
     revoked: bool
-    revoked_at: Optional[datetime]
-    last_used: Optional[datetime]
-    use_count: int
+    revoked_at: Optional[datetime] = None
+    last_used: Optional[datetime] = None
+    use_count: Optional[int] = 0
     
     class Config:
         from_attributes = True
@@ -86,10 +86,11 @@ class APIKeyStatusResponse(BaseModel):
     expires_at: Optional[datetime] = None
     expires_in_days: Optional[int] = None
     last_used: Optional[datetime] = None
-    use_count: Optional[int] = None
+    use_count: Optional[int] = 0
     status: Optional[str] = None
     warning: Optional[str] = None
     recommendation: Optional[str] = None
+    message: Optional[str] = None
 
 class RevokeAPIKeyResponse(BaseModel):
     message: str

@@ -12,6 +12,7 @@ class ApiKeyTracking(Base):
     issued_at = Column(TIMESTAMP, nullable=False)
     expires_at = Column(TIMESTAMP, nullable=False)
     revoked = Column(Boolean, default=False)
+    revoked_at = Column(TIMESTAMP)
     last_used = Column(TIMESTAMP)
     use_count = Column(Integer, default=0)
     

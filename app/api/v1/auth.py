@@ -4,7 +4,8 @@ from app.core.database import get_db
 from app.services.auth_service import AuthService
 from app.schemas.request.auth import LoginRequest, ChangePasswordRequest
 from app.schemas.response.auth import LoginResponse
-from app.core.auth import AuthHandler
+from app.core.auth import AuthHandler, require_api_key
+from datetime import datetime, timezone
 
 router = APIRouter(tags=["Authentication"])
 

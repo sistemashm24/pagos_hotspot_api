@@ -15,6 +15,11 @@ from app.models.empresa import Empresa
 from app.models.router import Router
 from app.models.producto import Producto
 from app.models.transaccion import Transaccion
+from app.models.api_key import ApiKeyTracking
+import hashlib
+
+class VerifyAPIKeyRequest(BaseModel):
+    api_key: str
 
 router = APIRouter()
 print("\n🔥 >>> CARGANDO: app.api.v1.admin.empresa <<< 🔥\n")
@@ -493,5 +498,55 @@ async def actualizar_router_mi_empresa(
             "usuario": router_obj.usuario,
             "ubicacion": router_obj.ubicacion,
             "activo": router_obj.activo
+        }
+    }
+
+@router.post("/mi-empresa/verify-api-key")
+async def verificar_api_key_empresa(
+    data: VerifyAPIKeyRequest,
+    usuario = Depends(require_cliente_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Validar una API Key y ver a qué router pertenece (Solo llaves de TU empresa)
+    """
+    token = data.api_key
+    if not token or not token.startswith("jwt_"):
+        raise HTTPException(status_code=400, detail="Formato de API Key inválido. Debe empezar con 'jwt_'")
+    
+    token_clean = token[4:]
+    key_hash = hashlib.sha256(token_clean.encode()).hexdigest()
+    
+    # Buscar en la base de datos
+    result = await db.execute(
+        select(ApiKeyTracking).where(
+            ApiKeyTracking.key_hash == key_hash,
+            ApiKeyTracking.empresa_id == usuario.empresa_id
+        )
+    )
+    api_key = result.scalar_one_or_none()
+    
+    if not api_key:
+        raise HTTPException(status_code=404, detail="API Key no encontrada o no pertenece a tu empresa")
+    
+    # Obtener info del router
+    router = await db.get(Router, api_key.router_id)
+    
+    return {
+        "status": "valid" if not api_key.revoked else "revoked",
+        "message": "API Key encontrada",
+        "key_id": api_key.key_id,
+        "router": {
+            "id": router.id,
+            "nombre": router.nombre,
+            "activo": router.activo
+        },
+        "info": {
+            "issued_at": api_key.issued_at,
+            "expires_at": api_key.expires_at,
+            "last_used": api_key.last_used,
+            "use_count": api_key.use_count,
+            "revoked": api_key.revoked,
+            "revoked_at": api_key.revoked_at
         }
     }
