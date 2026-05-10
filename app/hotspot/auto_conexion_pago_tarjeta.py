@@ -250,35 +250,63 @@ async def ejecutar_auto_conexion_v7(
             logger.info(f"[1] MAC: {mac} | Username: {username_lower}")
 
             # ─────────────────────────────────────────────
-            # LIMPIEZA PREVIA: SOLO SESIONES ACTIVAS POR USERNAME
+            # 0. CONSULTA DE ACTIVOS (Unificada para verificación y limpieza)
+            # ─────────────────────────────────────────────
+            active_sessions = []
+            try:
+                logger.info("[DEBUG] Consultando tabla de activos...")
+                active_sessions = list(conn(cmd='/ip/hotspot/active/print'))
+                
+                # A. VERIFICACIÓN INSTANTÁNEA (Si ya está conectado, salir rápido)
+                for session in active_sessions:
+                    if str(session.get('user', '')).strip().lower() == username_lower:
+                        s_mac = (session.get('mac-address') or "").lower().replace("-", ":")
+                        if s_mac == mac:
+                            logger.info(f"[OK] Sesión ya activa para {username_lower} con MAC {mac}. Retornando éxito inmediato.")
+                            return {
+                                "success": True,
+                                "conectado": True,
+                                "ip": session.get('address'),
+                                "mac": mac,
+                                "username": username,
+                                "session_info": {
+                                    "user": session.get('user'),
+                                    "address": session.get('address'),
+                                    "uptime": session.get('uptime', '0s'),
+                                    "bytes-in": session.get('bytes-in', '0'),
+                                    "bytes-out": session.get('bytes-out', '0')
+                                },
+                                "metodo_usado": "verificacion_inicial",
+                                "mensaje": "Ya conectado (verificación inicial)"
+                            }
+            except Exception as e:
+                logger.warning(f"[WARN] Error en consulta inicial de activos: {e}")
+
+            # ─────────────────────────────────────────────
+            # 1. LIMPIEZA PREVIA: USANDO LA LISTA YA OBTENIDA
             # ─────────────────────────────────────────────
             logger.info("[CLEAN] Eliminando sesiones activas previas por username...")
 
             try:
-                active = list(conn(cmd='/ip/hotspot/active/print'))
                 removed = 0
-
-                for session in active:
+                for session in active_sessions:
                     s_user = str(session.get('user', '')).strip().lower()
                     if s_user == username_lower:
                         sid = session.get('.id')
                         try:
                             list(conn(cmd='/ip/hotspot/active/remove', numbers=sid))
                             removed += 1
-                            logger.info(
-                                f"[CLEAN] Sesión eliminada | "
-                                f"ID={sid} | IP={session.get('address')} | MAC={session.get('mac-address')}"
-                            )
+                            logger.info(f"[CLEAN] Sesión eliminada | ID={sid} | IP={session.get('address')}")
                         except Exception as e:
                             logger.warning(f"[CLEAN] Error eliminando sesión {sid}: {e}")
 
                 if removed:
                     logger.info(f"[CLEAN] Total sesiones eliminadas: {removed}")
                 else:
-                    logger.info("[CLEAN] No había sesiones activas para este usuario")
+                    logger.info("[CLEAN] No había sesiones activas para limpiar")
 
             except Exception as e:
-                logger.error(f"[CLEAN] Error procesando sesiones activas: {e}")
+                logger.error(f"[CLEAN] Error procesando limpieza: {e}")
 
             time.sleep(1.0)
 
@@ -364,10 +392,10 @@ async def ejecutar_auto_conexion_v7(
                 # ─────────────────────────────────────────
                 # VERIFICACIÓN (SOLO POR USERNAME)
                 # ─────────────────────────────────────────
-                logger.info("[4] Verificando sesión activa...")
+                logger.info("[4] Verificando sesión activa (polling acelerado)...")
 
                 max_wait = 6.0
-                interval = 1.0
+                interval = 0.5 # Acelerado de 1.0 a 0.5
                 elapsed = 0.0
                 session_found = None
 
@@ -379,6 +407,7 @@ async def ejecutar_auto_conexion_v7(
                             break
 
                     if session_found:
+                        logger.info(f"[OK] Sesión confirmada tras {elapsed:.1f}s")
                         break
 
                     time.sleep(interval)
