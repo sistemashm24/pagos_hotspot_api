@@ -16,7 +16,8 @@ async def ejecutar_auto_conexion_v6(
     username: str,
     password: str,
     mac_address: str,
-    ip_address: str = None
+    ip_address: str = None,
+    api_instance = None
 ) -> Dict[str, Any]:
     """
     Versión v6 - Login DIRECTO (sin scripts) + limpieza SOLO de sesiones activas por username
@@ -26,13 +27,12 @@ async def ejecutar_auto_conexion_v6(
     from app.core.mikrotik_api import MikrotikAPI
     
     def worker():
-        with MikrotikAPI(
-            router_host,
-            router_port,
-            router_user,
-            router_password,
-            timeout=15  # un poco más de margen por si el login tarda
-        ) as api:
+        api = api_instance
+        external_api = api_instance is not None
+        try:
+            if not api:
+                api = MikrotikAPI(router_host, router_port, router_user, router_password, timeout=15)
+                api.open()
 
             mac = mac_address.lower().replace("-", ":")
             username_lower = username.strip().lower()
@@ -185,6 +185,9 @@ async def ejecutar_auto_conexion_v6(
                 "error": error_msg or "No se pudo autenticar con ninguno de los métodos",
                 "mensaje": "Login directo falló después de varios intentos. Revisa logs del router."
             }
+        finally:
+            if not external_api and api:
+                api.close()
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, worker)
@@ -220,7 +223,8 @@ async def ejecutar_auto_conexion_v7(
     username: str,
     password: str,
     mac_address: str,
-    ip_address: str | None = None
+    ip_address: str | None = None,
+    api_instance = None
 ) -> Dict[str, Any]:
     """
     Versión v7 - Login por SCRIPT + limpieza SOLO por username
@@ -229,16 +233,15 @@ async def ejecutar_auto_conexion_v7(
 
     logger.info(f"[START] auto-login v7 | user={username} | mac={mac_address}")
 
-    from core.mikrotik_api import MikrotikAPI
+    from app.core.mikrotik_api import MikrotikAPI
 
     def worker():
-        with MikrotikAPI(
-            router_host,
-            router_port,
-            router_user,
-            router_password,
-            timeout=20
-        ) as api:
+        api = api_instance
+        external_api = api_instance is not None
+        try:
+            if not api:
+                api = MikrotikAPI(router_host, router_port, router_user, router_password, timeout=20)
+                api.open()
 
             conn = api.connection
             mac = mac_address.lower().replace("-", ":")
@@ -443,6 +446,9 @@ async def ejecutar_auto_conexion_v7(
                     "error": str(e),
                     "mensaje": "Error durante el proceso de auto-login en RouterOS v7"
                 }
+        finally:
+            if not external_api and api:
+                api.close()
 
 
     loop = asyncio.get_event_loop()
@@ -460,40 +466,57 @@ async def ejecutar_auto_conexion(
     username: str,
     password: str,
     mac_address: str,
-    ip_address: str = None
+    ip_address: str = None,
+    api_instance = None,
+    major_version: int = None
 ) -> Dict[str, Any]:
     """
     Punto de entrada principal.
     Detecta la versión de RouterOS y llama a la función adecuada.
-    Conserva la misma firma para no romper el resto del código.
     """
     try:
-        print(f"🔍 Detectando versión de RouterOS...")
+        major = major_version
         
-        from app.core.mikrotik_api import MikrotikAPI
-        
-        # Conexión rápida solo para detectar versión
-        with MikrotikAPI(router_host, router_port, router_user, router_password, timeout=8) as api:
-            try:
-                res = api.connection(cmd="/system/resource/print")
-                version_str = next(iter(res)).get("version", "6.48").strip()
-                major = int(version_str.split(".")[0])
-                print(f"RouterOS detectado: v{version_str}")
-            except Exception:
-                major = 6
-                print("⚠️ No se pudo detectar versión → asumiendo v6")
+        if major is None:
+            print(f"🔍 Detectando versión de RouterOS...")
+            from app.core.mikrotik_api import MikrotikAPI
+            
+            # Si tenemos api_instance, lo usamos para detectar
+            if api_instance:
+                try:
+                    res = api_instance.connection(cmd="/system/resource/print")
+                    version_str = next(iter(res)).get("version", "6.48").strip()
+                    major = int(version_str.split(".")[0])
+                    print(f"RouterOS detectado via API existente: v{version_str}")
+                except Exception:
+                    major = 6
+            else:
+                # Conexión rápida solo para detectar versión
+                with MikrotikAPI(router_host, router_port, router_user, router_password, timeout=8) as api:
+                    try:
+                        res = api.connection(cmd="/system/resource/print")
+                        version_str = next(iter(res)).get("version", "6.48").strip()
+                        major = int(version_str.split(".")[0])
+                        print(f"RouterOS detectado: v{version_str}")
+                    except Exception:
+                        major = 6
+                        print("⚠️ No se pudo detectar versión → asumiendo v6")
         
         if major >= 7:
-            print("→ Delegando a versión optimizada para v7.x")
+            if major_version is not None: print("→ Usando versión optimizada para v7.x (pre-detectada)")
+            else: print("→ Delegando a versión optimizada para v7.x")
+            
             return await ejecutar_auto_conexion_v7(
                 router_host, router_port, router_user, router_password,
-                username, password, mac_address, ip_address
+                username, password, mac_address, ip_address, api_instance=api_instance
             )
         else:
-            print("→ Usando versión v6 ORIGINAL que funcionaba correctamente")
+            if major_version is not None: print("→ Usando versión v6 (pre-detectada)")
+            else: print("→ Usando versión v6 ORIGINAL que funcionaba correctamente")
+            
             return await ejecutar_auto_conexion_v6(
                 router_host, router_port, router_user, router_password,
-                username, password, mac_address, ip_address
+                username, password, mac_address, ip_address, api_instance=api_instance
             )
     
     except Exception as e:

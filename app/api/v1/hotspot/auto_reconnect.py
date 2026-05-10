@@ -49,11 +49,9 @@ class AutoReconnectResponse(BaseModel):
     error_detalle: Optional[str] = None
     timestamp: str
 
-def obtener_info_usuario_sync(host, port, user, password, hotspot_username):
-    api = None
+def obtener_info_usuario_api(api: MikrotikAPI, hotspot_username: str):
+    """Obtiene info de usuario usando una conexión ya abierta"""
     try:
-        api = MikrotikAPI(host, port, user, password, timeout=10)
-        api.open()
         query = (api.connection.path('/ip/hotspot/user')
                 .select('.id', 'name', 'password', 'profile', 'disabled', 'comment', 'limit-uptime', 'uptime','mac-address')
                 .where(Key('name') == hotspot_username))
@@ -70,10 +68,13 @@ def obtener_info_usuario_sync(host, port, user, password, hotspot_username):
             "disabled": usuario.get('disabled') == 'yes'
         }
     except Exception as e:
-        print(f"💥 Error obteniendo info: {e}")
+        print(f"💥 Error obteniendo info via API: {e}")
         return {"existe": False, "error": str(e)}
-    finally:
-        if api: api.close()
+
+def obtener_info_usuario_sync(host, port, user, password, hotspot_username):
+    """Versión legacy para compatibilidad si se usa fuera de un contexto con API abierta"""
+    with MikrotikAPI(host, port, user, password, timeout=10) as api:
+        return obtener_info_usuario_api(api, hotspot_username)
 
 @router.post("/hotspot/auto-reconnect", response_model=AutoReconnectResponse)
 async def auto_reconnect(request: AutoReconnectRequest, auth_data=Depends(require_api_key), db: AsyncSession = Depends(get_db)):
@@ -91,15 +92,19 @@ async def auto_reconnect(request: AutoReconnectRequest, auth_data=Depends(requir
         "error_detalle": None, "timestamp": datetime.utcnow().isoformat()
     }
 
+    api = None
     try:
         if not getattr(empresa, "activa", True): return {**response_base, "estado": "empresa_inactiva"}
         if not getattr(router_mikrotik, "activo", True): return {**response_base, "estado": "router_inactivo"}
         if es_mac(request.username): return {**response_base, "estado": "expirado"}
 
+        # --- UNA SOLA CONEXIÓN PARA TODO ---
+        api = MikrotikAPI(router_mikrotik.host, router_mikrotik.puerto, router_mikrotik.usuario, router_mikrotik.password_encrypted, timeout=15)
+        api.open()
+
         # 1. Obtener Usuario Base
         base_username = re.sub(r'_RANDMAC\d+$', '', request.username)
-        info_usuario = await asyncio.get_event_loop().run_in_executor(None, obtener_info_usuario_sync, 
-            router_mikrotik.host, router_mikrotik.puerto, router_mikrotik.usuario, router_mikrotik.password_encrypted, base_username)
+        info_usuario = obtener_info_usuario_api(api, base_username)
 
         if not info_usuario.get("existe"):
             return {**response_base, "estado": "expirado", "mensaje": "Usuario no encontrado"}
@@ -108,12 +113,9 @@ async def auto_reconnect(request: AutoReconnectRequest, auth_data=Depends(requir
         comment_original = (datos_usuario.get("comment") or "").upper()
         username_login = datos_usuario.get("name") or base_username
 
-        # 2. Lógica RANDMAC
+        # 2. Lógica RANDMAC (usando la misma conexión)
         if all(x in comment_original for x in ("MODE=", "TL=", "TA=")):
-            api = None
             try:
-                api = MikrotikAPI(router_mikrotik.host, router_mikrotik.puerto, router_mikrotik.usuario, router_mikrotik.password_encrypted, timeout=10)
-                api.open()
                 mac_normalized = request.current_mac.upper().strip().replace("-", ":").replace(".", ":")
                 
                 # Buscar clones por comentario
@@ -152,24 +154,30 @@ async def auto_reconnect(request: AutoReconnectRequest, auth_data=Depends(requir
                             if nuevo: api.connection.path("/ip/hotspot/user").update(**{".id": nuevo[0][".id"], "mac-address": mac_normalized})
                             username_login = copy_name
 
-                # 3. SEMBRAR COOKIE MANUAL (Opcional, si falla no rompe)
+                # 3. SEMBRAR COOKIE MANUAL (usando la misma conexión)
                 try:
                     viejas = list(api.connection.path("/ip/hotspot/cookie").select(".id").where(Key("mac-address") == mac_normalized))
                     for v in viejas: api.connection.path("/ip/hotspot/cookie").remove(**{".id": v[".id"]})
                     api.connection.path("/ip/hotspot/cookie").add(user=username_login, **{"mac-address": mac_normalized, "ip-address": request.current_ip, "expires": "3d 00:00:00"})
-                    print(f"   🍪 Intentando cookie manual para {username_login}")
+                    print(f"   🍪 Cookie manual sembrada para {username_login}")
                 except: pass
+            except Exception as e: print(f"💥 Error RANDMAC optimizado: {e}")
 
-            except Exception as e: print(f"💥 Error RANDMAC: {e}")
-            finally:
-                if api: api.close()
+        # 4. DETECTAR VERSIÓN (reutilizando conexión)
+        major_version = 6
+        try:
+            res = api.connection(cmd="/system/resource/print")
+            version_str = next(iter(res)).get("version", "6.48").strip()
+            major_version = int(version_str.split(".")[0])
+        except: pass
 
-        # 4. EJECUTAR CONEXIÓN (Detección automática interna)
+        # 5. EJECUTAR CONEXIÓN (reutilizando conexión y versión)
         resultado = await ejecutar_auto_conexion(
             router_host=router_mikrotik.host, router_port=router_mikrotik.puerto,
             router_user=router_mikrotik.usuario, router_password=router_mikrotik.password_encrypted,
             username=username_login, password="" if info_usuario["tipo_usuario"] == "pin" else info_usuario["password"],
-            mac_address=request.current_mac, ip_address=request.current_ip
+            mac_address=request.current_mac, ip_address=request.current_ip,
+            api_instance=api, major_version=major_version
         )
 
         response_base.update(
@@ -183,7 +191,9 @@ async def auto_reconnect(request: AutoReconnectRequest, auth_data=Depends(requir
 
     except Exception as e:
         traceback.print_exc()
-        return {**response_base, "mensaje": "Error interno", "error_detalle": str(e)}
+        return {**response_base, "mensaje": "Error interno de reconexión", "error_detalle": str(e)}
+    finally:
+        if api: api.close()
 
 # ========== PERFIL INFO ENDPOINT ==========
 class UserProfileRequest(BaseModel):
