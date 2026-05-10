@@ -280,31 +280,37 @@ async def ejecutar_auto_conexion_v7(
             time.sleep(1.0)
 
             # ─────────────────────────────────────────────
-            # OBTENER IP SI NO SE PROPORCIONA
+            # OBTENER IP (Priorizar detección por MAC para usar 'To Address')
             # ─────────────────────────────────────────────
             import ipaddress
 
             def is_valid_ipv4(value: str) -> bool:
+                if not value: return False
                 try:
                     ip = ipaddress.ip_address(value)
                     return ip.version == 4 and str(ip) != "0.0.0.0"
                 except Exception:
                     return False
                 
-            client_ip = ip_address if is_valid_ipv4(ip_address) else None
+            client_ip = None
+            logger.info(f"[2] Buscando IP en tabla de hosts para MAC: {mac}")
+            try:
+                # Buscamos en la tabla de hosts para obtener la IP real (To Address)
+                hosts = list(conn(cmd='/ip/hotspot/host/print'))
+                for host in hosts:
+                    if host.get('mac-address', '').lower() == mac:
+                        # CRITICO: Priorizar 'to-address' sobre 'address' para evitar 'unknown host'
+                        client_ip = host.get('to-address') or host.get('address')
+                        if client_ip:
+                            logger.info(f"[OK] IP detectada en router: {client_ip} (To Address preferido)")
+                            break
+            except Exception as e:
+                logger.error(f"[ERROR] Detectando IP por MAC: {e}")
 
-            if not client_ip:
-                logger.info("[2] Detectando IP del cliente...")
-                try:
-                    hosts = list(conn(cmd='/ip/hotspot/host/print'))
-                    for host in hosts:
-                        if host.get('mac-address', '').lower() == mac:
-                            client_ip = host.get('to-address') or host.get('address')
-                            if client_ip:
-                                logger.info(f"[OK] IP detectada: {client_ip}")
-                                break
-                except Exception as e:
-                    logger.error(f"[ERROR] Detectando IP: {e}")
+            # Fallback a la IP enviada por el cliente si no se encontró en la tabla Host
+            if not client_ip and is_valid_ipv4(ip_address):
+                client_ip = ip_address
+                logger.info(f"[OK] Usando IP de fallback proporcionada: {client_ip}")
 
             if not client_ip:
                 return {
